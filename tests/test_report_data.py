@@ -1,0 +1,260 @@
+"""Unit tests for report_data.py — stdlib unittest only."""
+
+import sqlite3
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from db_layer import make_hash
+from report_data import (
+    category_options,
+    category_transactions,
+    list_months,
+    month_over_month,
+    month_report,
+    subscriptions,
+    summary,
+    uncategorised,
+)
+
+
+def make_test_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL,
+            source_account TEXT NOT NULL,
+            category TEXT NOT NULL,
+            balance REAL,
+            raw_hash TEXT UNIQUE NOT NULL
+        )
+    """)
+    return conn
+
+
+def insert_row(conn, date, description, amount, category, account="test"):
+    h = make_hash(date, description, amount, account)
+    conn.execute(
+        """INSERT INTO transactions
+           (date, description, amount, source_account, category, balance, raw_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (date, description, amount, account, category, None, h),
+    )
+
+
+class TestListMonths(unittest.TestCase):
+    def test_sorted(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-06-01", "A", -10, "Groceries")
+        insert_row(conn, "2026-04-01", "B", -10, "Groceries")
+        insert_row(conn, "2026-05-01", "C", -10, "Groceries")
+        conn.commit()
+        self.assertEqual(list_months(conn), ["2026-04", "2026-05", "2026-06"])
+
+
+class TestMonthReport(unittest.TestCase):
+    def setUp(self):
+        self.conn = make_test_conn()
+        insert_row(self.conn, "2026-05-01", "TESCO", -100, "Groceries")
+        insert_row(self.conn, "2026-05-15", "SALARY", 3000, "Income")
+        insert_row(self.conn, "2026-05-20", "F/FLOW", -500, "Transfer")
+        self.conn.commit()
+
+    def test_totals(self):
+        data = month_report(self.conn, "2026-05")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["total_spend"], -100)
+        self.assertEqual(data["income"], 3000)
+        self.assertEqual(data["net"], 2900)
+
+    def test_excludes_non_spending(self):
+        data = month_report(self.conn, "2026-05")
+        cats = [c["name"] for c in data["categories"]]
+        self.assertIn("Groceries", cats)
+        self.assertNotIn("Transfer", cats)
+
+    def test_empty_month(self):
+        data = month_report(self.conn, "2026-01")
+        self.assertTrue(data["empty"])
+
+    def test_benchmark(self):
+        insert_row(self.conn, "2026-05-02", "NETFLIX", -30, "Subscriptions")
+        self.conn.commit()
+        data = month_report(self.conn, "2026-05")
+        b = data["benchmark"]
+        # Matches analyze.py: abs(needs) / total_spend * 100 (total_spend is negative)
+        self.assertAlmostEqual(b["needs_pct"], abs(b["needs"]) / data["total_spend"] * 100)
+        self.assertIsNotNone(b["savings_rate"])
+
+
+class TestMonthOverMonth(unittest.TestCase):
+    def test_grid_and_totals(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-04-01", "TESCO", -100, "Groceries")
+        insert_row(conn, "2026-05-01", "TESCO", -120, "Groceries")
+        insert_row(conn, "2026-06-01", "TESCO", -110, "Groceries")
+        conn.commit()
+        data = month_over_month(conn)
+        self.assertFalse(data["empty"])
+        self.assertEqual(len(data["months"]), 3)
+        self.assertEqual(data["grid"]["Groceries"]["2026-05"], -120)
+        self.assertEqual(data["totals"]["2026-04"], -100)
+
+    def test_insufficient_months(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        conn.commit()
+        data = month_over_month(conn)
+        self.assertTrue(data["insufficient_months"])
+
+    def test_anomaly_detected(self):
+        conn = make_test_conn()
+        for m, amt in [("2026-04", -50), ("2026-05", -50), ("2026-06", -85)]:
+            insert_row(conn, f"{m}-01", "UBER", amt, "Transport")
+        conn.commit()
+        data = month_over_month(conn)
+        transport_anomalies = [a for a in data["anomalies"] if a["category"] == "Transport"]
+        self.assertEqual(len(transport_anomalies), 1)
+        self.assertEqual(transport_anomalies[0]["direction"], "up")
+
+    def test_anomaly_skips_small_change(self):
+        conn = make_test_conn()
+        for m, amt in [("2026-04", -50), ("2026-05", -50), ("2026-06", -55)]:
+            insert_row(conn, f"{m}-01", "UBER", amt, "Transport")
+        conn.commit()
+        data = month_over_month(conn)
+        self.assertEqual(data["anomalies"], [])
+
+
+class TestUncategorised(unittest.TestCase):
+    def test_distinct_descriptions(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "MYSTERY SHOP", -12.99, "Uncategorised")
+        insert_row(conn, "2026-05-02", "MYSTERY SHOP", -12.99, "Uncategorised")
+        insert_row(conn, "2026-05-03", "OTHER SHOP", -5.00, "Uncategorised")
+        conn.commit()
+        rows = uncategorised(conn)
+        self.assertEqual(len(rows), 2)
+
+    def test_rows_include_representative_id(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "MYSTERY SHOP", -12.99, "Uncategorised")
+        insert_row(conn, "2026-05-02", "MYSTERY SHOP", -12.99, "Uncategorised")
+        conn.commit()
+        rows = uncategorised(conn)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("id", rows[0])
+        self.assertIsNotNone(rows[0]["id"])
+
+
+class TestCategoryTransactions(unittest.TestCase):
+    def setUp(self):
+        self.conn = make_test_conn()
+        insert_row(self.conn, "2026-05-03", "TESCO", -45.67, "Groceries", "credit_card")
+        insert_row(self.conn, "2026-05-10", "SAINSBURY", -30.00, "Groceries", "credit_card")
+        insert_row(self.conn, "2026-05-12", "TESCO REFUND", 5.00, "Groceries", "credit_card")
+        insert_row(self.conn, "2026-05-15", "NETFLIX", -9.99, "Subscriptions")
+        self.conn.commit()
+
+    def test_returns_transactions(self):
+        data = category_transactions(self.conn, "2026-05", "Groceries")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 3)
+        self.assertEqual(len(data["transactions"]), 3)
+        self.assertEqual(data["transactions"][0]["date"], "2026-05-03")
+        self.assertEqual(data["transactions"][0]["source_account"], "credit_card")
+        self.assertIn("id", data["transactions"][0])
+        self.assertEqual(data["transactions"][0]["category"], "Groceries")
+
+    def test_total_and_count(self):
+        data = category_transactions(self.conn, "2026-05", "Groceries")
+        expected_total = sum(t["amount"] for t in data["transactions"])
+        self.assertAlmostEqual(data["total"], expected_total)
+        self.assertEqual(data["total"], -70.67)
+
+    def test_includes_refunds(self):
+        data = category_transactions(self.conn, "2026-05", "Groceries")
+        amounts = [t["amount"] for t in data["transactions"]]
+        self.assertIn(5.00, amounts)
+
+    def test_empty_month_category(self):
+        data = category_transactions(self.conn, "2026-01", "Groceries")
+        self.assertTrue(data["empty"])
+
+    def test_other_category_excluded(self):
+        data = category_transactions(self.conn, "2026-05", "Subscriptions")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 1)
+
+
+class TestCategoryOptions(unittest.TestCase):
+    def test_includes_rules_db_and_uncategorised(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -10, "Groceries")
+        insert_row(conn, "2026-05-02", "MYSTERY", -5, "My Custom Cat")
+        conn.commit()
+        options = category_options(conn)
+        self.assertIn("Groceries", options)
+        self.assertIn("Uncategorised", options)
+        self.assertIn("My Custom Cat", options)
+        self.assertIn("Income", options)
+
+
+class TestSubscriptions(unittest.TestCase):
+    def test_detected(self):
+        conn = make_test_conn()
+        for m in ["2026-04", "2026-05", "2026-06"]:
+            insert_row(conn, f"{m}-01", "NETFLIX", -9.99, "Subscriptions")
+        conn.commit()
+        data = subscriptions(conn)
+        self.assertEqual(len(data["items"]), 1)
+        self.assertAlmostEqual(data["estimated_monthly"], -9.99)
+
+    def test_rejects_variable_amounts(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-04-01", "AMAZON", -10, "Shopping")
+        insert_row(conn, "2026-05-01", "AMAZON", -50, "Shopping")
+        insert_row(conn, "2026-06-01", "AMAZON", -20, "Shopping")
+        conn.commit()
+        self.assertEqual(subscriptions(conn)["items"], [])
+
+    def test_rejects_frequent_charges(self):
+        conn = make_test_conn()
+        for i in range(3):
+            insert_row(conn, f"2026-04-{i+1:02d}", "COFFEE SHOP", -3.50, "Dining & Takeaway")
+        for i in range(3):
+            insert_row(conn, f"2026-05-{i+1:02d}", "COFFEE SHOP", -3.50, "Dining & Takeaway")
+        for i in range(3):
+            insert_row(conn, f"2026-06-{i+1:02d}", "COFFEE SHOP", -3.50, "Dining & Takeaway")
+        conn.commit()
+        self.assertEqual(subscriptions(conn)["items"], [])
+
+
+class TestSummary(unittest.TestCase):
+    def test_empty_db(self):
+        conn = make_test_conn()
+        data = summary(conn)
+        self.assertTrue(data["empty"])
+        self.assertIn("message", data)
+
+    def test_full(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-04-01", "TESCO", -100, "Groceries")
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        insert_row(conn, "2026-05-02", "UNKNOWN", -5, "Uncategorised")
+        conn.commit()
+        data = summary(conn)
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["latest_month"], "2026-05")
+        self.assertEqual(data["uncategorised_count"], 1)
+        self.assertIsNotNone(data["month"])
+        self.assertIsNotNone(data["trends"])
+
+
+if __name__ == "__main__":
+    unittest.main()

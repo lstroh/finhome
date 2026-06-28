@@ -1,0 +1,26 @@
+# Real financial data — never commit this
+data/accounts/*.csv
+data/credit_card/*.csv
+db/*.db
+db/*.db-wal
+db/*.db-shm
+db/*.db-journal
+reports/*
+
+# Keep folder structure in git
+!data/accounts/.gitkeep
+!data/credit_card/.gitkeep
+!db/.gitkeep
+!reports/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

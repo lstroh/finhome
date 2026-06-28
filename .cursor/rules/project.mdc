@@ -1,0 +1,96 @@
+---
+description: Project context and conventions for the personal finance tracker
+alwaysApply: true
+---
+
+# Finance Tracker — Project Rules
+
+## What this project is
+
+A **private, local-only** Python tool that imports bank/credit card CSV
+exports, categorises transactions, stores them in SQLite, and generates
+spending reports. Stdlib only — no external dependencies, no network
+calls, ever. This is a deliberate privacy constraint, not an oversight.
+
+## Hard constraints — never violate these
+
+- **No network calls of any kind.** No `requests`, no `urllib` for
+  external hosts, no telemetry, no "phone home" anything. This tool's
+  entire value proposition is that financial data never leaves the
+  user's machine.
+- **No external pip dependencies.** Everything must run with stdlib only
+  (`csv`, `sqlite3`, `pathlib`, `datetime`, `hashlib`, `argparse`,
+  `collections`). If a task seems to need a package, find a stdlib way
+  first and ask before adding a dependency.
+- **Never commit real financial data.** `data/accounts/*.csv`,
+  `data/credit_card/*.csv`, and `db/*.db` must stay gitignored. Only
+  `.gitkeep` placeholders belong in those folders in version control.
+- **Fail loudly, never silently corrupt.** When parsing untrusted CSV
+  input (dates, amounts), prefer raising an exception that gets caught
+  and reported per-row over guessing or coercing a value that might be
+  wrong. A skipped row with a clear error is always better than a wrong
+  number silently entering someone's financial totals. (This is why
+  `parse_amount` has a £100,000 sanity ceiling — see git history /
+  CURSOR_PROMPT.md for the bug this fixed.)
+
+## Architecture
+
+- `db_layer.py` — SQLite schema + insert/update functions. Every
+  transaction is fingerprinted (`make_hash`) from
+  `date|description|amount|source_account` so re-importing the same file
+  never creates duplicates. Don't change the hash formula without
+  considering that it will treat all previously-imported data as "new"
+  on next run (effectively re-importing everything). Manual category
+  overrides live in `category_overrides` (keyed by normalized
+  description) and are applied via `resolve_category()`.
+- `importer.py` — CSV → DB. Two formats: bank (`Transaction Date,
+  Transaction Type, Sort Code, Account Number, Transaction Description,
+  Debit Amount, Credit Amount, Balance`, tab or comma delimited, debit/
+  credit are separate columns) and credit card (`Date, Description,
+  Amount`, sign auto-detected per file). Auto-detects delimiter via
+  `csv.Sniffer`. Spending is always stored as a **negative** amount,
+  income/credit as positive, regardless of source format. Uses
+  `resolve_category()` so manual overrides win over keyword rules.
+- `categoriser.py` — thin wrapper that applies `rules/categories.py`
+  keyword matching to a description string. First matching category
+  wins; order in the rules dict matters.
+- `recategorise.py` — re-applies keyword rules to all DB rows via
+  `resolve_category()` (manual overrides preserved).
+- `rules/categories.py` — the only file end users should need to edit
+  regularly. Keyword lists per category, plus `NON_SPENDING_CATEGORIES`
+  (excluded from spend totals — transfers, card repayments, income) and
+  `NEEDS_CATEGORIES` / `WANTS_CATEGORIES` (for the 50/30/20 benchmark).
+- `report_data.py` — pure data functions for reports (dicts/lists, no
+  print/HTTP). Shared by `analyze.py` and `web_server.py`.
+- `analyze.py` — thin CLI wrapper over `report_data`; formats output via
+  `print_*` functions. CSV export via `--export`.
+- `web_server.py` — stdlib HTTP server on **127.0.0.1 only**; serves
+  `web/static/` and JSON `/api/*` endpoints from `report_data`. Read-only
+  for imports; supports local category edits via `POST
+  /api/transaction/category` (updates all rows with the same normalized
+  description and persists an override).
+
+## Conventions
+
+- All currency values are `float` GBP, negative = money out.
+- Dates are stored as ISO `YYYY-MM-DD` strings in the DB regardless of
+  source format.
+- `month_key(date_str)` = `date_str[:7]` — the standard way to group by
+  month throughout `report_data.py` and `analyze.py`.
+- When adding a new CLI flag to `analyze.py`, follow the existing
+  `argparse` pattern and keep the default (no-flag) behavior as the
+  "full picture" report (latest month + trends + subscriptions).
+
+## When making changes
+
+- After editing `rules/categories.py`, run `python recategorise.py` to
+  re-apply keyword rules to existing rows (manual UI overrides are kept),
+  or delete `db/finance.db` and re-run `importer.py` for a full rebuild
+  (overrides are lost). Mention this to the user if you edit categorisation
+  rules.
+- Test changes to `importer.py` parsing logic against edge cases:
+  malformed amounts, unquoted commas in descriptions, missing columns,
+  empty files — not just the happy path.
+- Keep functions stdlib-testable without needing real bank data — use
+  synthetic CSVs with fake merchant names/amounts when verifying fixes
+  (see CURSOR_PROMPT.md history for examples of this pattern).
