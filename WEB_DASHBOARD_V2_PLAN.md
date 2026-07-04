@@ -6,7 +6,7 @@
 
 **Goal:** Ship transaction drill-down and year view — without breaking CLI parity or v1 security constraints.
 
-**Status:** Phase 1 complete (2026-06-21). Category editing addendum complete (2026-06-27). Next: Phase 2 (year view).
+**Status:** Phase 1 complete (2026-06-21). Category editing addendum complete (2026-06-27). Payment search addendum complete (2026-06-28). Search category editing complete (2026-06-28). Next: Phase 2 (year view).
 
 **Scope decisions:**
 
@@ -38,6 +38,8 @@
 | 2 | Year view | **Yes** | Not started |
 | 3 | Polish (optional) | **Yes** | Not started |
 | A | Category editing addendum | **Yes** | **Done** (2026-06-27) |
+| B | Payment search addendum | **Yes** | **Done** (2026-06-28) |
+| C | Search category editing | **Yes** | **Done** (2026-06-28) |
 | — | Live reload (SSE/polling) | **No** | Rejected — manual browser refresh |
 | — | Print / PDF | **No** | Deferred to v3 |
 | — | Dark mode | **No** | Deferred to v3 |
@@ -50,13 +52,13 @@
 
 | Component | Role today |
 |-----------|------------|
-| `report_data.py` | v1 functions + **`category_transactions()`** (Phase 1) |
-| `web_server.py` | v1 routes + **`GET /api/transactions`** (Phase 1) |
-| `web/static/` | 4 tabs; Overview category rows **clickable** with drill-down panel (Phase 1) |
+| `report_data.py` | v1 functions + **`category_transactions()`**, **`search_transactions()`** |
+| `web_server.py` | v1 routes + **`GET /api/transactions`**, **`GET /api/search`** |
+| `web/static/` | 5 tabs (Overview, Trends, Subscriptions, **Search**, Uncategorised); Overview category rows **clickable** with drill-down panel |
 | `analyze.py` | Unchanged in v2 so far |
-| `tests/test_report_data.py` | 20 tests (+5 for `category_transactions`) |
-| `tests/test_web_server.py` | 12 tests (+3 for `/api/transactions`) |
-| **Total tests** | **32** (was 24 at v1) |
+| `tests/test_report_data.py` | +5 for `category_transactions`, +8 for `search_transactions` |
+| `tests/test_web_server.py` | +3 for `/api/transactions`, +5 for `/api/search`, +4 for category API |
+| **Total tests** | **55** (was 24 at v1) |
 
 After import or recategorise: **refresh the browser page** — no auto-reload in v2.
 
@@ -68,6 +70,7 @@ After import or recategorise: **refresh the browser page** — no auto-reload in
 Browser (HTML/CSS/JS)
         │
         │  GET /api/transactions?month=&category=   → Phase 1 (done)
+        │  GET /api/search?q=&scope=&month|year=    → Search addendum (done)
         │  GET /api/transactions?year=&category=    → Phase 2 (planned)
         │  GET /api/year?year=YYYY                  → Phase 2 (planned)
         │  GET /api/years                           → Phase 2 (planned)
@@ -77,6 +80,7 @@ web_server.py  (http.server on 127.0.0.1:PORT)
         │
         └── report_data.py
               ├── category_transactions()   → done
+              ├── search_transactions()     → Search addendum (done)
               ├── year_report()             → Phase 2
               ├── list_years()              → Phase 2
               └── … existing v1 functions …
@@ -90,15 +94,15 @@ No schema changes to SQLite. All v2 queries filter the existing `transactions` t
 
 ```
 finance_tracker/
-├── report_data.py          # + category_transactions()
-├── web_server.py           # + /api/transactions route
+├── report_data.py          # + category_transactions(), search_transactions()
+├── web_server.py           # + /api/transactions, /api/search routes
 ├── web/static/
-│   ├── index.html          # + drilldown-panel, category hint
-│   ├── style.css           # + drilldown, clickable row styles
-│   └── app.js              # + drilldown state, toggleDrilldown()
+│   ├── index.html          # + drilldown-panel, Search tab
+│   ├── style.css           # + drilldown, search toolbar styles
+│   └── app.js              # + drilldown + search state/rendering
 ├── tests/
-│   ├── test_report_data.py # + TestCategoryTransactions (5 tests)
-│   └── test_web_server.py  # + transactions API tests (3 tests)
+│   ├── test_report_data.py # + TestCategoryTransactions, TestSearchTransactions
+│   └── test_web_server.py  # + transactions, search, category API tests
 └── WEB_DASHBOARD_V2_PLAN.md
 ```
 
@@ -267,7 +271,7 @@ At Phase 1 completion, nothing else changed. Later category-editing work updated
 | `recategorise.py` | Re-applies keyword rules while preserving manual overrides |
 | `report_data.py` | `category_transactions()` returns `id`/`category`; `uncategorised()` returns a representative `id`; added `category_options()` |
 | `web_server.py` | Added `GET /api/categories` and `POST /api/transaction/category` |
-| `web/static/app.js` | Added category editors in Overview drill-down and Uncategorised tab, including custom categories |
+| `web/static/app.js` | Added category editors in Overview drill-down, Uncategorised tab, and Search results (2026-06-28), including custom categories |
 | `web/static/style.css` | Added compact editor/dropdown/button styling |
 | `README.md` | Documented dashboard category editing, overrides, and manual testing |
 | `.cursor/rules/project.mdc` | Updated architecture notes for overrides and the local write endpoint |
@@ -316,6 +320,95 @@ Manual checks still recommended:
 3. Move a transaction to/from `Income`, `Transfer`, or `Credit Card Payment` and confirm spend totals shift as expected.
 4. Try descriptions/categories with special characters and confirm the UI renders safely.
 5. Confirm the server still starts on `127.0.0.1` only and no outbound network behaviour was introduced.
+
+---
+
+## Addendum — Payment search (2026-06-28)
+
+**User story:** Search for payments by merchant or description in the dashboard, scoped to one month, one calendar year, or all imported data.
+
+### What shipped
+
+| File | Change |
+|------|--------|
+| `report_data.py` | Added `_escape_like_literal()` and `search_transactions()` |
+| `web_server.py` | Added `GET /api/search`; `YEAR_RE`, `MAX_SEARCH_QUERY_LEN = 200` |
+| `web/static/index.html` | Added **Search** tab with query input, scope selector, month/year dropdowns |
+| `web/static/style.css` | Added search toolbar, input, and submit button styles |
+| `web/static/app.js` | Added search state, scope controls, submit-on-Enter, results table; later added shared category editor in search results |
+| `README.md` | Documented Search tab usage and manual testing |
+| `tests/test_report_data.py` | Added `TestSearchTransactions` (8 tests) |
+| `tests/test_web_server.py` | Added 5 `/api/search` validation and data tests |
+
+### API contract
+
+```text
+GET /api/search?q=BROMCOM&scope=month&month=2026-01
+GET /api/search?q=BROMCOM&scope=year&year=2026
+GET /api/search?q=BROMCOM&scope=all
+```
+
+| Param | Required | Validation |
+|-------|----------|------------|
+| `q` | yes | non-empty after trim, max 200 chars |
+| `scope` | yes | `month`, `year`, or `all` |
+| `month` | when `scope=month` | `YYYY-MM` |
+| `year` | when `scope=year` | `YYYY` |
+
+**Return shape (populated):**
+
+```python
+{
+    "query": "BROMCOM",
+    "scope": "all",
+    "empty": False,
+    "total": -4409.0,
+    "count": 6,
+    "transactions": [
+        {
+            "id": 1,
+            "date": "2025-12-12",
+            "description": "BROMCOM BROMCOM UNITED KINGDOM",
+            "amount": -80.0,
+            "source_account": "credit_card",
+            "category": "Education & Childcare",
+        },
+        # … sorted by date, then description
+    ],
+}
+```
+
+### Behaviour notes
+
+- Searches **transaction descriptions only** (case-insensitive substring match).
+- User input is escaped so `%` and `_` are treated as literal characters, not SQL wildcards.
+- Includes all matching rows in scope, including refunds; `total` is the net sum of amounts.
+- Year options in the UI are derived from imported months (`state.months`).
+
+### Search category editing (2026-06-28)
+
+Reuses the same category editor as Overview drill-down and Uncategorised — no new API or backend logic.
+
+| File | Change |
+|------|--------|
+| `web/static/app.js` | Search results render `renderCategoryEditor()` per row; `saveTransactionCategory()` and `refreshAfterCategoryChange()` refresh active search after save |
+
+**Behaviour:**
+
+- Each search result row shows category dropdown + **Custom…** + **Save** (same as other tabs).
+- Save shows **Saving…** state, then re-fetches the active search so updated categories appear on all matching rows.
+- Changes apply to all transactions with the same normalized description via existing `POST /api/transaction/category`.
+
+**Manual check:** search `BROMCOM` (All data) → change category on one row → Save → all BROMCOM rows show the new category.
+
+### Testing status
+
+```bash
+python -m unittest discover -s tests -v
+# Ran 55 tests ... OK
+```
+
+Manual check: open the **Search** tab, search `BROMCOM` with **All data**, confirm count and total match expectations.
 
 ---
 
@@ -508,8 +601,8 @@ python -m unittest discover -s tests -v
 
 | File | Change |
 |------|--------|
-| `README.md` | Drill-down, year tab, manual refresh note |
-| `.cursor/rules/project.mdc` | New API routes, `category_transactions`, year functions |
+| `README.md` | Drill-down, Search tab, year tab, manual refresh note |
+| `.cursor/rules/project.mdc` | New API routes, `category_transactions`, `search_transactions`, year functions |
 | `WEB_DASHBOARD_PLAN.md` | Add "See also: WEB_DASHBOARD_V2_PLAN.md" at top |
 | `WEB_DASHBOARD_V2_PLAN.md` | Mark phases/addenda complete with dates |
 
@@ -519,6 +612,8 @@ python -m unittest discover -s tests -v
 
 - [x] **Phase 1** — Transaction drill-down (`category_transactions`, `/api/transactions`, clickable rows)
 - [x] **Addendum** — Editable categories (`category_overrides`, `/api/categories`, `POST /api/transaction/category`, UI editors)
+- [x] **Addendum** — Payment search (`search_transactions`, `/api/search`, Search tab)
+- [x] **Addendum** — Search category editing (reuse editor in Search results)
 - [ ] **Phase 2** — Year view (`year_report`, `--year`, Year tab, year drill-down)
 - [ ] **Phase 3** — Optional polish + docs
 - [ ] **Docs** — README, project rules, cross-links
@@ -535,11 +630,21 @@ python -m unittest discover -s tests -v
 
 ### Category editing addendum (done)
 
-- [x] Category changes can be saved from Overview drill-down and Uncategorised tab
+- [x] Category changes can be saved from Overview drill-down, Uncategorised tab, and Search results
 - [x] Saves apply to all rows with the same normalized description and persist in `category_overrides`
 - [x] Automated tests cover DB override helpers, API validation/update behaviour, and report payload changes
 - [ ] Manual owner check: persistence through `recategorise.py` and re-import
 - [ ] Manual owner check: non-spending category edge cases and special-character rendering
+
+### Payment search addendum (done)
+
+- [x] Search tab finds transactions by description substring
+- [x] Month, year, and all-data scopes filter correctly
+- [x] Literal `%` and `_` in search text do not act as wildcards
+- [x] Automated tests cover `search_transactions` and `/api/search` validation
+- [x] Search results reuse shared category editor; active search refreshes after save
+- [ ] Manual owner check: search a known merchant (e.g. BROMCOM) across scopes
+- [ ] Manual owner check: change category from Search tab and confirm all matching rows update
 
 ### Remaining (Phases 2–3)
 
@@ -555,6 +660,8 @@ python -m unittest discover -s tests -v
 |-------|------------|--------|
 | 1 — Drill-down | ~150 lines Python + ~80 lines JS/CSS | **Done** |
 | Addendum — Editable categories | ~200 lines Python/JS/CSS + tests/docs | **Done** |
+| Addendum — Payment search | ~150 lines Python/JS/CSS + tests/docs | **Done** |
+| Addendum — Search category edit | ~30 lines JS (frontend only) | **Done** |
 | 2 — Year view | ~120 lines Python + ~100 lines JS + CLI formatter | Not started |
 | 3 — Polish | ~20 lines scattered + docs | Not started |
 

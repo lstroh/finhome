@@ -347,6 +347,92 @@ class TestWebServerApi(unittest.TestCase):
         self.assertNotIn("Uncategorised", cats)
         self.assertLess(month["total_spend"], 0)
 
+    def test_search_missing_query_returns_400(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(self.host, self.port, "/api/search?scope=all")
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "q is required"})
+
+    def test_search_invalid_scope_returns_400(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(
+                self.host, self.port, "/api/search?q=BROMCOM&scope=week"
+            )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "scope must be month, year, or all"})
+
+    def test_search_invalid_month_returns_400(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(
+                self.host, self.port, "/api/search?q=BROMCOM&scope=month&month=bad"
+            )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "month must be YYYY-MM"})
+
+    def test_search_invalid_year_returns_400(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(
+                self.host, self.port, "/api/search?q=BROMCOM&scope=year&year=20"
+            )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "year must be YYYY"})
+
+    def test_search_with_data(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2025-12-12", "BROMCOM BROMCOM", -80, "Education & Childcare")
+        _insert_row(conn, "2026-01-02", "BROMCOM BROMCOM", -1218, "Education & Childcare")
+        _insert_row(conn, "2026-05-03", "TESCO", -45.67, "Groceries")
+        conn.commit()
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            all_status, _, all_data = _get_json(
+                self.host, self.port, "/api/search?q=BROMCOM&scope=all"
+            )
+            year_status, _, year_data = _get_json(
+                self.host, self.port, "/api/search?q=BROMCOM&scope=year&year=2026"
+            )
+            month_status, _, month_data = _get_json(
+                self.host, self.port, "/api/search?q=BROMCOM&scope=month&month=2026-01"
+            )
+
+        self.assertEqual(all_status, 200)
+        self.assertFalse(all_data["empty"])
+        self.assertEqual(all_data["count"], 2)
+
+        self.assertEqual(year_status, 200)
+        self.assertFalse(year_data["empty"])
+        self.assertEqual(year_data["count"], 1)
+
+        self.assertEqual(month_status, 200)
+        self.assertFalse(month_data["empty"])
+        self.assertEqual(month_data["count"], 1)
+        self.assertAlmostEqual(month_data["total"], -1218)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ const state = {
   drilldown: { month: null, category: null, data: null, loading: false },
   currentMonth: null,
   savingCategoryId: null,
+  search: { query: "", scope: "month", month: null, year: null, loading: false, data: null },
 };
 
 function fmtGbp(amount) {
@@ -111,6 +112,7 @@ async function saveTransactionCategory(transactionId, category) {
   state.savingCategoryId = transactionId;
   if (state.drilldown.data) renderDrilldownPanel();
   if (state.uncategorised) renderUncategorised(state.uncategorised);
+  if (state.search.data) renderSearchResults();
 
   try {
     await fetchJson("/api/transaction/category", {
@@ -125,12 +127,18 @@ async function saveTransactionCategory(transactionId, category) {
     setError(err.message);
     if (state.drilldown.data) renderDrilldownPanel();
     if (state.uncategorised) renderUncategorised(state.uncategorised);
+    if (state.search.data) renderSearchResults();
   }
 }
 
 async function refreshAfterCategoryChange() {
   const drillMonth = state.drilldown.month;
   const drillCategory = state.drilldown.category;
+  const searchQuery = state.search.query;
+  const searchScope = state.search.scope;
+  const searchMonth = state.search.month;
+  const searchYear = state.search.year;
+  const hadSearchResults = Boolean(state.search.data);
 
   const summary = await fetchJson("/api/summary");
   state.summary = summary;
@@ -175,6 +183,25 @@ async function refreshAfterCategoryChange() {
     if (!data.empty && state.currentMonth && !state.currentMonth.empty) {
       renderCategoryTable(state.currentMonth.categories);
     }
+  }
+
+  if (hadSearchResults && searchQuery) {
+    let url = `/api/search?q=${encodeURIComponent(searchQuery)}&scope=${encodeURIComponent(searchScope)}`;
+    if (searchScope === "month") {
+      url += `&month=${encodeURIComponent(searchMonth)}`;
+    } else if (searchScope === "year") {
+      url += `&year=${encodeURIComponent(searchYear)}`;
+    }
+    const data = await fetchJson(url);
+    state.search = {
+      query: searchQuery,
+      scope: searchScope,
+      month: searchScope === "month" ? searchMonth : null,
+      year: searchScope === "year" ? searchYear : null,
+      loading: false,
+      data,
+    };
+    renderSearchResults();
   }
 }
 
@@ -594,6 +621,155 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function uniqueYears(months) {
+  return [...new Set(months.map((m) => m.slice(0, 4)))].sort();
+}
+
+function searchScopeLabel(scope, month, year) {
+  if (scope === "month") return month;
+  if (scope === "year") return year;
+  return "all data";
+}
+
+function renderSearchScopeControls() {
+  const scope = document.getElementById("search-scope").value;
+  const monthLabel = document.getElementById("search-month-label");
+  const monthSelect = document.getElementById("search-month");
+  const yearLabel = document.getElementById("search-year-label");
+  const yearSelect = document.getElementById("search-year");
+
+  const showMonth = scope === "month";
+  const showYear = scope === "year";
+
+  monthLabel.classList.toggle("hidden", !showMonth);
+  monthSelect.classList.toggle("hidden", !showMonth);
+  yearLabel.classList.toggle("hidden", !showYear);
+  yearSelect.classList.toggle("hidden", !showYear);
+}
+
+function renderSearchSelectors() {
+  const monthSelect = document.getElementById("search-month");
+  const yearSelect = document.getElementById("search-year");
+  const years = uniqueYears(state.months);
+
+  monthSelect.innerHTML = state.months.map((m) =>
+    `<option value="${escapeHtml(m)}"${m === state.search.month ? " selected" : ""}>${escapeHtml(m)}</option>`
+  ).join("");
+
+  yearSelect.innerHTML = years.map((y) =>
+    `<option value="${escapeHtml(y)}"${y === state.search.year ? " selected" : ""}>${escapeHtml(y)}</option>`
+  ).join("");
+
+  document.getElementById("search-scope").value = state.search.scope;
+  document.getElementById("search-query").value = state.search.query;
+  renderSearchScopeControls();
+}
+
+function renderSearchResults() {
+  const container = document.getElementById("search-results");
+  const { loading, data } = state.search;
+
+  if (loading) {
+    container.innerHTML = `<p class="muted">Searching…</p>`;
+    return;
+  }
+
+  if (!data) {
+    container.innerHTML = `<p class="muted">Enter a merchant or description and click Search.</p>`;
+    return;
+  }
+
+  const scopeText = searchScopeLabel(data.scope, data.month, data.year);
+
+  if (data.empty) {
+    container.innerHTML = `
+      <p class="search-meta">No matches for “${escapeHtml(data.query)}” in ${escapeHtml(scopeText)}.</p>
+    `;
+    return;
+  }
+
+  const txRows = data.transactions.map((t) => `
+    <tr>
+      <td>${escapeHtml(t.date)}</td>
+      <td>${escapeHtml(t.description)}</td>
+      <td>${escapeHtml(t.source_account)}</td>
+      <td class="amount">${fmtGbp(t.amount)}</td>
+      <td class="category-cell">${renderCategoryEditor(t)}</td>
+    </tr>
+  `).join("");
+
+  container.innerHTML = `
+    <p class="search-meta">${data.count} transaction${data.count === 1 ? "" : "s"} · Total ${fmtGbp(data.total)} · “${escapeHtml(data.query)}” in ${escapeHtml(scopeText)} · Category changes apply to all matching descriptions.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Description</th>
+            <th>Account</th>
+            <th class="amount">Amount</th>
+            <th>Category</th>
+          </tr>
+        </thead>
+        <tbody>${txRows}</tbody>
+      </table>
+    </div>
+  `;
+  bindCategoryEditors(container);
+}
+
+async function runSearch() {
+  clearError();
+  const query = document.getElementById("search-query").value.trim();
+  const scope = document.getElementById("search-scope").value;
+  const month = document.getElementById("search-month").value;
+  const year = document.getElementById("search-year").value;
+
+  if (!query) {
+    setError("Enter a search term.");
+    return;
+  }
+
+  state.search = {
+    query,
+    scope,
+    month: scope === "month" ? month : null,
+    year: scope === "year" ? year : null,
+    loading: true,
+    data: null,
+  };
+  renderSearchResults();
+
+  const submitBtn = document.getElementById("search-submit");
+  submitBtn.disabled = true;
+
+  try {
+    let url = `/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`;
+    if (scope === "month") {
+      url += `&month=${encodeURIComponent(month)}`;
+    } else if (scope === "year") {
+      url += `&year=${encodeURIComponent(year)}`;
+    }
+    const data = await fetchJson(url);
+    state.search = {
+      query,
+      scope,
+      month: scope === "month" ? month : null,
+      year: scope === "year" ? year : null,
+      loading: false,
+      data,
+    };
+    renderSearchResults();
+  } catch (err) {
+    state.search.loading = false;
+    state.search.data = null;
+    renderSearchResults();
+    setError(err.message);
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
 function switchView(view) {
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.view === view;
@@ -636,10 +812,16 @@ async function init() {
     renderSubscriptions(state.subscriptions);
     renderUncategorised(state.uncategorised);
 
+    state.search.month = summary.latest_month;
+    state.search.year = uniqueYears(state.months).slice(-1)[0] || null;
+    renderSearchSelectors();
+    renderSearchResults();
+
     switchView("overview");
     document.querySelectorAll(".view").forEach((v) => v.classList.remove("hidden"));
     hide("view-trends");
     hide("view-subscriptions");
+    hide("view-search");
     hide("view-uncategorised");
     show("view-overview");
   } catch (err) {
@@ -658,6 +840,22 @@ document.getElementById("month-select").addEventListener("change", async (e) => 
     await loadMonth(e.target.value);
   } catch (err) {
     setError(err.message);
+  }
+});
+
+document.getElementById("search-scope").addEventListener("change", () => {
+  state.search.scope = document.getElementById("search-scope").value;
+  renderSearchScopeControls();
+});
+
+document.getElementById("search-submit").addEventListener("click", () => {
+  runSearch();
+});
+
+document.getElementById("search-query").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    runSearch();
   }
 });
 

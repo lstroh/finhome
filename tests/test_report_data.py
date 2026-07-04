@@ -14,6 +14,7 @@ from report_data import (
     list_months,
     month_over_month,
     month_report,
+    search_transactions,
     subscriptions,
     summary,
     uncategorised,
@@ -203,6 +204,60 @@ class TestCategoryOptions(unittest.TestCase):
         self.assertIn("Uncategorised", options)
         self.assertIn("My Custom Cat", options)
         self.assertIn("Income", options)
+
+
+class TestSearchTransactions(unittest.TestCase):
+    def setUp(self):
+        self.conn = make_test_conn()
+        insert_row(self.conn, "2025-12-12", "BROMCOM BROMCOM UNITED KINGDOM", -80, "Education & Childcare")
+        insert_row(self.conn, "2026-01-02", "BROMCOM BROMCOM UNITED KINGDOM", -1218, "Education & Childcare")
+        insert_row(self.conn, "2026-05-03", "TESCO STORES", -45.67, "Groceries")
+        insert_row(self.conn, "2026-05-12", "BROMCOM REFUND", 10, "Education & Childcare")
+        insert_row(self.conn, "2026-06-01", "100% SHOP", -5, "Shopping")
+        insert_row(self.conn, "2026-06-02", "A_B SHOP", -7, "Shopping")
+        self.conn.commit()
+
+    def test_case_insensitive_description_match(self):
+        data = search_transactions(self.conn, "bromcom", "all")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 3)
+
+    def test_month_scope(self):
+        data = search_transactions(self.conn, "BROMCOM", "month", month="2026-01")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["transactions"][0]["amount"], -1218)
+
+    def test_year_scope(self):
+        data = search_transactions(self.conn, "BROMCOM", "year", year="2026")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 2)
+
+    def test_all_scope(self):
+        data = search_transactions(self.conn, "BROMCOM", "all")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 3)
+        self.assertAlmostEqual(data["total"], -80 - 1218 + 10)
+
+    def test_literal_percent_not_wildcard(self):
+        data = search_transactions(self.conn, "100%", "all")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["transactions"][0]["description"], "100% SHOP")
+
+    def test_literal_underscore_not_wildcard(self):
+        data = search_transactions(self.conn, "A_B", "all")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["transactions"][0]["description"], "A_B SHOP")
+
+    def test_empty_query_raises(self):
+        with self.assertRaises(ValueError):
+            search_transactions(self.conn, "   ", "all")
+
+    def test_no_matches(self):
+        data = search_transactions(self.conn, "NOPE", "all")
+        self.assertTrue(data["empty"])
 
 
 class TestSubscriptions(unittest.TestCase):

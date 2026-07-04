@@ -101,15 +101,17 @@ python3 -m unittest discover -s tests -v
 ```
 
 **Automated coverage includes:** report calculations, category drill-down
-API, category editing (`POST /api/transaction/category`), override
-persistence in `db_layer`, and web server security (localhost bind,
-path traversal, error responses).
+API, payment search (`GET /api/search`), category editing
+(`POST /api/transaction/category`), override persistence in `db_layer`,
+and web server security (localhost bind, path traversal, error responses).
 
 **Manual checks recommended** (not fully automated):
 
 | Area | What to verify |
 |------|----------------|
 | Overview drill-down | Click a category → change category → totals/benchmark refresh |
+| Search tab | Search by merchant/description → scope Month/Year/All data → results and total match |
+| Search category edit | Change category from Search results → Save → all matching descriptions update |
 | Uncategorised tab | Assign a category → row disappears, banner count drops |
 | Custom category | Type a new name via **Custom…** → appears in reports and dropdown |
 | Persistence | After a UI edit, run `recategorise.py` and re-import CSVs → override kept |
@@ -130,14 +132,25 @@ Open **http://127.0.0.1:8765** in your browser. The server binds to
 network. Refresh the page after re-running `importer.py` to see new data.
 
 The dashboard mirrors `analyze.py`: overview with month selector, trends,
-subscriptions, and uncategorised transactions. You can also **edit
-categories in the browser** — click a category on the Overview tab to
-drill down into individual transactions, or use the Uncategorised tab.
-Changing a category updates all transactions with the same description
-across every month and is remembered on future imports.
+subscriptions, uncategorised transactions, and a **Search** tab. Search
+matches transaction descriptions only (e.g. `BROMCOM`) and can be scoped
+to one month, one calendar year, or all imported data. You can also
+**edit categories in the browser** — click a category on the Overview tab to
+drill down into individual transactions, use the Uncategorised tab, or
+change a category from Search results. Changing a category updates all
+transactions with the same description across every month and is remembered
+on future imports.
 
 Import stays on the CLI (`importer.py`). Keyword rule changes use
 `recategorise.py` or a full DB rebuild (see below).
+
+**Search tab:** enter a merchant or description, choose **Month**, **Year**,
+or **All data**, then click **Search** (or press Enter). Results show date,
+description, account, amount, and an editable category column, plus a count
+and net total. Refunds appear if their description matches. Use the category
+dropdown (or **Custom…**) and **Save** to re-categorise a merchant; the change
+applies to all transactions with the same description, same as on Overview
+and Uncategorised.
 
 ## Tuning categorisation
 
@@ -148,10 +161,10 @@ falling through the cracks, then add keywords for those merchants.
 
 **From the dashboard:** on the Overview tab, click a category row to
 see its transactions and change a category from the dropdown (or pick
-**Custom…** for a new name). The Uncategorised tab has the same editor.
-A change applies to every transaction with that exact description and
-is stored as an override so it survives re-imports and
-`python3 recategorise.py`.
+**Custom…** for a new name). The Uncategorised tab and **Search** tab
+use the same editor. A change applies to every transaction with that
+exact description and is stored as an override so it survives re-imports
+and `python3 recategorise.py`.
 
 **From the CLI:** after editing keyword rules in `rules/categories.py`,
 run `python3 recategorise.py` to re-apply rules to existing rows.

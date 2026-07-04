@@ -242,6 +242,84 @@ def category_transactions(conn, month: str, category: str):
     }
 
 
+def _escape_like_literal(text: str) -> str:
+    """Escape SQLite LIKE wildcards so user input is matched literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_transactions(conn, query: str, scope: str, month: str = None, year: str = None):
+    """
+    Search transaction descriptions within a date scope.
+
+    scope: 'month' (requires month=YYYY-MM), 'year' (requires year=YYYY), or 'all'.
+    """
+    q = query.strip()
+    if not q:
+        raise ValueError("query is required")
+
+    pattern = f"%{_escape_like_literal(q)}%"
+    sql = (
+        "SELECT id, date, description, amount, source_account, category "
+        "FROM transactions WHERE description LIKE ? ESCAPE '\\'"
+    )
+    params = [pattern]
+
+    if scope == "month":
+        if not month:
+            raise ValueError("month is required for month scope")
+        sql += " AND date LIKE ?"
+        params.append(f"{month}%")
+    elif scope == "year":
+        if not year:
+            raise ValueError("year is required for year scope")
+        sql += " AND date LIKE ?"
+        params.append(f"{year}-%")
+    elif scope != "all":
+        raise ValueError("invalid scope")
+
+    sql += " ORDER BY date, description"
+    cur = conn.execute(sql, params)
+    rows = cur.fetchall()
+
+    if not rows:
+        result = {
+            "query": q,
+            "scope": scope,
+            "empty": True,
+        }
+        if scope == "month":
+            result["month"] = month
+        elif scope == "year":
+            result["year"] = year
+        return result
+
+    transactions = [
+        {
+            "id": row_id,
+            "date": date,
+            "description": description,
+            "amount": amount,
+            "source_account": source_account,
+            "category": row_category,
+        }
+        for row_id, date, description, amount, source_account, row_category in rows
+    ]
+    total = sum(t["amount"] for t in transactions)
+    result = {
+        "query": q,
+        "scope": scope,
+        "empty": False,
+        "total": total,
+        "count": len(transactions),
+        "transactions": transactions,
+    }
+    if scope == "month":
+        result["month"] = month
+    elif scope == "year":
+        result["year"] = year
+    return result
+
+
 def uncategorised(conn):
     cur = conn.execute(
         "SELECT MIN(id), description, amount FROM transactions "

@@ -22,6 +22,7 @@ from report_data import (
     list_months,
     month_over_month,
     month_report,
+    search_transactions,
     subscriptions,
     summary,
     uncategorised,
@@ -29,7 +30,9 @@ from report_data import (
 
 STATIC_DIR = (Path(__file__).parent / "web" / "static").resolve()
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+YEAR_RE = re.compile(r"^\d{4}$")
 MAX_CATEGORY_LEN = 100
+MAX_SEARCH_QUERY_LEN = 200
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -94,8 +97,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._api(lambda conn: self._json_ok(category_transactions(conn, month, cat)))
         elif path == "/api/categories":
             self._api(lambda conn: self._json_ok(category_options(conn)))
+        elif path == "/api/search":
+            self._api_search(query)
         else:
             self._json_error(404, "not found")
+
+    def _api_search(self, query):
+        q = query.get("q", [None])[0]
+        scope = query.get("scope", [None])[0]
+        month = query.get("month", [None])[0]
+        year = query.get("year", [None])[0]
+
+        if not q or not q.strip():
+            self._json_error(400, "q is required")
+            return
+        if len(q) > MAX_SEARCH_QUERY_LEN:
+            self._json_error(400, "query too long")
+            return
+        if scope not in ("month", "year", "all"):
+            self._json_error(400, "scope must be month, year, or all")
+            return
+        if scope == "month":
+            if not month or not MONTH_RE.match(month):
+                self._json_error(400, "month must be YYYY-MM")
+                return
+        elif scope == "year":
+            if not year or not YEAR_RE.match(year):
+                self._json_error(400, "year must be YYYY")
+                return
+
+        def handler(conn):
+            try:
+                data = search_transactions(conn, q, scope, month=month, year=year)
+            except ValueError as exc:
+                self._json_error(400, str(exc))
+                return
+            self._json_ok(data)
+
+        self._api(handler)
 
     def _post_transaction_category(self):
         if not DB_PATH.exists():

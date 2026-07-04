@@ -16,6 +16,7 @@
     <button class="tab active" data-view="overview" role="tab" aria-selected="true">Overview</button>
     <button class="tab" data-view="trends" role="tab" aria-selected="false">Trends</button>
     <button class="tab" data-view="subscriptions" role="tab" aria-selected="false">Subscriptions</button>
+    <button class="tab" data-view="search" role="tab" aria-selected="false">Search</button>
     <button class="tab" data-view="uncategorised" role="tab" aria-selected="false">Uncategorised</button>
   </nav>
 
@@ -47,6 +48,25 @@
 
     <section id="view-subscriptions" class="view hidden">
       <div id="subscriptions-content"></div>
+    </section>
+
+    <section id="view-search" class="view hidden">
+      <div class="toolbar search-toolbar">
+        <label for="search-query">Search</label>
+        <input type="search" id="search-query" class="search-input" placeholder="Merchant or description, e.g. BROMCOM" maxlength="200">
+        <label for="search-scope">Scope</label>
+        <select id="search-scope">
+          <option value="month">Month</option>
+          <option value="year">Year</option>
+          <option value="all">All data</option>
+        </select>
+        <label for="search-month" id="search-month-label">Month</label>
+        <select id="search-month"></select>
+        <label for="search-year" id="search-year-label" class="hidden">Year</label>
+        <select id="search-year" class="hidden"></select>
+        <button type="button" id="search-submit" class="search-submit">Search</button>
+      </div>
+      <div id="search-results"></div>
     </section>
 
     <section id="view-uncategorised" class="view hidden">
