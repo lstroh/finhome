@@ -15,10 +15,12 @@ const state = {
     data: null,
     loading: false,
     selectedSource: null,
+    sort: { key: "date", asc: true },
   },
   currentMonth: null,
   savingCategoryId: null,
-  search: { query: "", scope: "month", month: null, year: null, loading: false, data: null },
+  search: { query: "", scope: "month", month: null, year: null, loading: false, data: null, sort: { key: "date", asc: true } },
+  transactions: { month: null, data: null, loading: false, selectedSource: null, sort: { key: "date", asc: true } },
 };
 
 function fmtGbp(amount) {
@@ -33,6 +35,61 @@ function fmtGbp(amount) {
 function fmtPct(value) {
   if (value == null) return "—";
   return Math.abs(value).toFixed(1) + "%";
+}
+
+function amountClass(amount) {
+  if (amount > 0) return "amount positive";
+  if (amount < 0) return "amount negative";
+  return "amount";
+}
+
+function sortTransactions(transactions, { key, asc }) {
+  return [...transactions].sort((a, b) => {
+    let cmp;
+    switch (key) {
+      case "date":
+        cmp = a.date.localeCompare(b.date);
+        break;
+      case "description":
+        cmp = a.description.localeCompare(b.description);
+        break;
+      case "source_account":
+        cmp = a.source_account.localeCompare(b.source_account);
+        break;
+      case "amount":
+        cmp = a.amount - b.amount;
+        break;
+      case "category":
+        cmp = a.category.localeCompare(b.category);
+        break;
+      default:
+        cmp = 0;
+    }
+    if (cmp === 0 && key !== "description") {
+      cmp = a.description.localeCompare(b.description);
+    }
+    return asc ? cmp : -cmp;
+  });
+}
+
+function sortIndicator(sort, key) {
+  if (sort.key !== key) return "";
+  return sort.asc ? "▲" : "▼";
+}
+
+function bindTransactionSort(container, sortState, onUpdate) {
+  container.querySelectorAll("th.sortable").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      if (sortState.key === key) {
+        sortState.asc = !sortState.asc;
+      } else {
+        sortState.key = key;
+        sortState.asc = true;
+      }
+      onUpdate();
+    });
+  });
 }
 
 // Okabe-Ito + Paul Tol Bright — maximally distinct hues, colorblind-safe.
@@ -132,12 +189,11 @@ function renderSourceFilterTabs(colorMap, selectedSource) {
   return `<div class="drilldown-tabs" role="tablist" aria-label="Filter by account">${allTab}${accountTabs}</div>`;
 }
 
-function bindSourceFilterTabs(panel) {
+function bindSourceFilterTabs(panel, onSelect) {
   panel.querySelectorAll(".drilldown-tabs .tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       const source = tab.dataset.source || null;
-      state.drilldown.selectedSource = source;
-      renderDrilldownPanel();
+      onSelect(source);
     });
   });
 }
@@ -150,7 +206,7 @@ function renderTransactionRows(transactions, colorMap) {
         <td>${escapeHtml(t.date)}</td>
         <td>${escapeHtml(t.description)}</td>
         <td>${escapeHtml(t.source_account)}</td>
-        <td class="amount">${fmtGbp(t.amount)}</td>
+        <td class="${amountClass(t.amount)}">${fmtGbp(t.amount)}</td>
         <td class="category-cell">${renderCategoryEditor(t)}</td>
       </tr>
     `;
@@ -158,7 +214,7 @@ function renderTransactionRows(transactions, colorMap) {
 }
 
 function renderTransactionTable(transactions, metaHtml, options = {}) {
-  const { showLegend = true, colorMap: colorMapOverride, total } = options;
+  const { showLegend = true, colorMap: colorMapOverride, total, sort } = options;
   const colorMap = colorMapOverride || buildSourceColorMap(transactions);
   const legend = showLegend ? renderSourceLegend(colorMap) : "";
   const txRows = renderTransactionRows(transactions, colorMap);
@@ -167,24 +223,33 @@ function renderTransactionTable(transactions, metaHtml, options = {}) {
       ? `<tfoot>
           <tr class="table-total-row">
             <td colspan="3"><strong>Total</strong></td>
-            <td class="amount"><strong>${fmtGbp(total)}</strong></td>
+            <td class="${amountClass(total)}"><strong>${fmtGbp(total)}</strong></td>
             <td></td>
           </tr>
         </tfoot>`
       : "";
+  const headers = sort
+    ? `<tr>
+          <th class="sortable" data-sort="date">Date <span class="sort-indicator">${sortIndicator(sort, "date")}</span></th>
+          <th class="sortable" data-sort="description">Description <span class="sort-indicator">${sortIndicator(sort, "description")}</span></th>
+          <th class="sortable" data-sort="source_account">Account <span class="sort-indicator">${sortIndicator(sort, "source_account")}</span></th>
+          <th class="sortable amount" data-sort="amount">Amount <span class="sort-indicator">${sortIndicator(sort, "amount")}</span></th>
+          <th class="sortable" data-sort="category">Category <span class="sort-indicator">${sortIndicator(sort, "category")}</span></th>
+        </tr>`
+    : `<tr>
+          <th>Date</th>
+          <th>Description</th>
+          <th>Account</th>
+          <th class="amount">Amount</th>
+          <th>Category</th>
+        </tr>`;
   return `
     ${metaHtml}
     ${legend}
     <div class="table-wrap">
       <table>
         <thead>
-          <tr>
-            <th>Date</th>
-            <th>Description</th>
-            <th>Account</th>
-            <th class="amount">Amount</th>
-            <th>Category</th>
-          </tr>
+          ${headers}
         </thead>
         <tbody>${txRows}</tbody>
         ${footer}
@@ -290,6 +355,7 @@ async function saveTransactionCategory(transactionId, category) {
     state.savingCategoryId = null;
     setError(err.message);
     if (state.drilldown.data) renderDrilldownPanel();
+    if (state.transactions.data) renderTransactionsView();
     if (state.uncategorised) renderUncategorised(state.uncategorised);
     if (state.search.data) renderSearchResults();
   }
@@ -344,6 +410,7 @@ async function refreshAfterCategoryChange() {
       data,
       loading: false,
       selectedSource: prevSource,
+      sort: state.drilldown.sort,
     };
     renderDrilldownPanel();
     if (!data.empty && state.currentMonth && !state.currentMonth.empty) {
@@ -366,8 +433,24 @@ async function refreshAfterCategoryChange() {
       year: searchScope === "year" ? searchYear : null,
       loading: false,
       data,
+      sort: state.search.sort,
     };
     renderSearchResults();
+  }
+
+  if (state.transactions.data && state.transactions.month) {
+    const prevSource = state.transactions.selectedSource;
+    const data = await fetchJson(
+      `/api/transactions?month=${encodeURIComponent(state.transactions.month)}`
+    );
+    state.transactions = {
+      month: state.transactions.month,
+      data,
+      loading: false,
+      selectedSource: prevSource,
+      sort: state.transactions.sort,
+    };
+    renderTransactionsView();
   }
 }
 
@@ -441,12 +524,14 @@ function renderCategoryTable(categories) {
 }
 
 function closeDrilldown() {
+  const sort = state.drilldown.sort;
   state.drilldown = {
     month: null,
     category: null,
     data: null,
     loading: false,
     selectedSource: null,
+    sort,
   };
   hide("drilldown-panel");
   document.querySelectorAll(".category-row.selected").forEach((row) => {
@@ -504,6 +589,7 @@ function renderDrilldownPanel() {
     normalizeDrilldownSource(colorMap);
     const { selectedSource } = state.drilldown;
     const filtered = filterTransactionsBySource(data.transactions, selectedSource);
+    const sorted = sortTransactions(filtered, state.drilldown.sort);
     const count = filtered.length;
     const total = filtered.reduce((sum, t) => sum + t.amount, 0);
     const metaHtml = `<p class="drilldown-meta">${count} transaction${count === 1 ? "" : "s"} · Total ${fmtGbp(total)} · Category changes apply to all matching descriptions.</p>`;
@@ -514,10 +600,14 @@ function renderDrilldownPanel() {
         <button type="button" class="drilldown-close">Close</button>
       </div>
       ${tabsHtml}
-      ${renderTransactionTable(filtered, metaHtml, { showLegend: false, colorMap, total })}
+      ${renderTransactionTable(sorted, metaHtml, { showLegend: false, colorMap, total, sort: state.drilldown.sort })}
     `;
-    bindSourceFilterTabs(panel);
+    bindSourceFilterTabs(panel, (source) => {
+      state.drilldown.selectedSource = source;
+      renderDrilldownPanel();
+    });
     bindCategoryEditors(panel);
+    bindTransactionSort(panel, state.drilldown.sort, renderDrilldownPanel);
   }
   panel.querySelector(".drilldown-close").addEventListener("click", closeDrilldown);
 }
@@ -542,6 +632,7 @@ async function toggleDrilldown(category) {
     data: null,
     loading: true,
     selectedSource: null,
+    sort: state.drilldown.sort,
   };
   if (state.currentMonth && !state.currentMonth.empty) {
     renderCategoryTable(state.currentMonth.categories);
@@ -559,6 +650,7 @@ async function toggleDrilldown(category) {
       data,
       loading: false,
       selectedSource: null,
+      sort: state.drilldown.sort,
     };
     renderDrilldownPanel();
     if (state.currentMonth && !state.currentMonth.empty) {
@@ -569,6 +661,130 @@ async function toggleDrilldown(category) {
     if (state.currentMonth && !state.currentMonth.empty) {
       renderCategoryTable(state.currentMonth.categories);
     }
+    setError(err.message);
+  }
+}
+
+function normalizeTransactionsSource(colorMap) {
+  const { selectedSource } = state.transactions;
+  if (selectedSource && !colorMap[selectedSource]) {
+    state.transactions.selectedSource = null;
+  }
+}
+
+function renderTransactionsMonthSelect() {
+  const select = document.getElementById("transactions-month-select");
+  if (!select) return;
+  select.innerHTML = state.months.map((m) =>
+    `<option value="${escapeHtml(m)}"${m === state.transactions.month ? " selected" : ""}>${escapeHtml(m)}</option>`
+  ).join("");
+}
+
+function renderTransactionsView() {
+  const container = document.getElementById("transactions-content");
+  const { month, data, loading } = state.transactions;
+
+  if (!month) {
+    container.innerHTML = `<p class="muted">Select a month.</p>`;
+    return;
+  }
+
+  if (loading) {
+    container.innerHTML = `
+      <div class="drilldown">
+        <div class="drilldown-header">
+          <h2>All transactions — ${escapeHtml(month)}</h2>
+        </div>
+        <p class="muted">Loading…</p>
+      </div>
+    `;
+    return;
+  }
+
+  if (!data) {
+    container.innerHTML = `
+      <div class="drilldown">
+        <div class="drilldown-header">
+          <h2>All transactions — ${escapeHtml(month)}</h2>
+        </div>
+        <p class="muted">Could not load transactions. Check the error above and try again.</p>
+      </div>
+    `;
+    return;
+  }
+
+  if (data.empty) {
+    container.innerHTML = `
+      <div class="drilldown">
+        <div class="drilldown-header">
+          <h2>All transactions — ${escapeHtml(data.month)}</h2>
+        </div>
+        <p class="muted">No transactions for this month.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const colorMap = buildSourceColorMap(data.transactions);
+  normalizeTransactionsSource(colorMap);
+  const { selectedSource } = state.transactions;
+  const filtered = filterTransactionsBySource(data.transactions, selectedSource);
+  const sorted = sortTransactions(filtered, state.transactions.sort);
+  const count = filtered.length;
+  const total = filtered.reduce((sum, t) => sum + t.amount, 0);
+  const metaHtml = `<p class="drilldown-meta">${count} transaction${count === 1 ? "" : "s"} · Total ${fmtGbp(total)} · Category changes apply to all matching descriptions.</p>`;
+  const tabsHtml = renderSourceFilterTabs(colorMap, selectedSource);
+  container.innerHTML = `
+    <div class="drilldown">
+      <div class="drilldown-header">
+        <h2>All transactions — ${escapeHtml(data.month)}</h2>
+      </div>
+      ${tabsHtml}
+      ${renderTransactionTable(sorted, metaHtml, { showLegend: false, colorMap, total, sort: state.transactions.sort })}
+    </div>
+  `;
+  bindSourceFilterTabs(container, (source) => {
+    state.transactions.selectedSource = source;
+    renderTransactionsView();
+  });
+  bindCategoryEditors(container);
+  bindTransactionSort(container, state.transactions.sort, renderTransactionsView);
+}
+
+async function loadTransactionsMonth(month) {
+  clearError();
+  const sort = state.transactions.sort;
+  state.transactions = {
+    month,
+    data: null,
+    loading: true,
+    selectedSource: null,
+    sort,
+  };
+  renderTransactionsMonthSelect();
+  renderTransactionsView();
+
+  try {
+    const data = await fetchJson(
+      `/api/transactions?month=${encodeURIComponent(month)}`
+    );
+    state.transactions = {
+      month,
+      data,
+      loading: false,
+      selectedSource: null,
+      sort,
+    };
+    renderTransactionsView();
+  } catch (err) {
+    state.transactions = {
+      month,
+      data: null,
+      loading: false,
+      selectedSource: null,
+      sort,
+    };
+    renderTransactionsView();
     setError(err.message);
   }
 }
@@ -856,9 +1072,11 @@ function renderSearchResults() {
     return;
   }
 
+  const sorted = sortTransactions(data.transactions, state.search.sort);
   const metaHtml = `<p class="search-meta">${data.count} transaction${data.count === 1 ? "" : "s"} · Total ${fmtGbp(data.total)} · “${escapeHtml(data.query)}” in ${escapeHtml(scopeText)} · Category changes apply to all matching descriptions.</p>`;
-  container.innerHTML = renderTransactionTable(data.transactions, metaHtml);
+  container.innerHTML = renderTransactionTable(sorted, metaHtml, { sort: state.search.sort });
   bindCategoryEditors(container);
+  bindTransactionSort(container, state.search.sort, renderSearchResults);
 }
 
 async function runSearch() {
@@ -880,6 +1098,7 @@ async function runSearch() {
     year: scope === "year" ? year : null,
     loading: true,
     data: null,
+    sort: state.search.sort,
   };
   renderSearchResults();
 
@@ -901,6 +1120,7 @@ async function runSearch() {
       year: scope === "year" ? year : null,
       loading: false,
       data,
+      sort: state.search.sort,
     };
     renderSearchResults();
   } catch (err) {
@@ -914,6 +1134,7 @@ async function runSearch() {
 }
 
 function switchView(view) {
+  clearError();
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.view === view;
     tab.classList.toggle("active", active);
@@ -921,6 +1142,10 @@ function switchView(view) {
   });
   document.querySelectorAll(".view").forEach((section) => section.classList.add("hidden"));
   show(`view-${view}`);
+  if (view === "transactions" && !state.transactions.data && !state.transactions.loading) {
+    const month = state.transactions.month || state.selectedMonth;
+    if (month) loadTransactionsMonth(month);
+  }
 }
 
 async function loadMonth(month) {
@@ -957,14 +1182,17 @@ async function init() {
 
     state.search.month = summary.latest_month;
     state.search.year = uniqueYears(state.months).slice(-1)[0] || null;
+    state.transactions.month = summary.latest_month;
     renderSearchSelectors();
     renderSearchResults();
+    renderTransactionsMonthSelect();
 
     switchView("overview");
     document.querySelectorAll(".view").forEach((v) => v.classList.remove("hidden"));
     hide("view-trends");
     hide("view-subscriptions");
     hide("view-search");
+    hide("view-transactions");
     hide("view-uncategorised");
     show("view-overview");
   } catch (err) {
@@ -1000,6 +1228,10 @@ document.getElementById("search-query").addEventListener("keydown", (e) => {
     e.preventDefault();
     runSearch();
   }
+});
+
+document.getElementById("transactions-month-select").addEventListener("change", (e) => {
+  loadTransactionsMonth(e.target.value);
 });
 
 init();

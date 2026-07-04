@@ -17,6 +17,7 @@
     <button class="tab" data-view="trends" role="tab" aria-selected="false">Trends</button>
     <button class="tab" data-view="subscriptions" role="tab" aria-selected="false">Subscriptions</button>
     <button class="tab" data-view="search" role="tab" aria-selected="false">Search</button>
+    <button class="tab" data-view="transactions" role="tab" aria-selected="false">Transactions</button>
     <button class="tab" data-view="uncategorised" role="tab" aria-selected="false">Uncategorised</button>
   </nav>
 
@@ -67,6 +68,14 @@
         <button type="button" id="search-submit" class="search-submit">Search</button>
       </div>
       <div id="search-results"></div>
+    </section>
+
+    <section id="view-transactions" class="view hidden">
+      <div class="toolbar">
+        <label for="transactions-month-select">Month</label>
+        <select id="transactions-month-select"></select>
+      </div>
+      <div id="transactions-content"></div>
     </section>
 
     <section id="view-uncategorised" class="view hidden">

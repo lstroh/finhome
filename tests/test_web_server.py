@@ -211,18 +211,29 @@ class TestWebServerApi(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(data, {"error": "month must be YYYY-MM"})
 
-    def test_transactions_missing_category_returns_400(self):
+    def test_transactions_all_month(self):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db_path = Path(tmp.name) / "test.db"
         _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-03", "TESCO", -45.67, "Groceries", "credit_card")
+        _insert_row(conn, "2026-05-12", "SALARY", 2500.00, "Income", "current_account")
+        _insert_row(conn, "2026-05-15", "NETFLIX", -9.99, "Subscriptions")
+        conn.commit()
+        conn.close()
 
         with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
             status, _, data = _get_json(
                 self.host, self.port, "/api/transactions?month=2026-05"
             )
-        self.assertEqual(status, 400)
-        self.assertEqual(data, {"error": "category is required"})
+        self.assertEqual(status, 200)
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 3)
+        self.assertAlmostEqual(data["total"], 2500.00 - 45.67 - 9.99)
+        amounts = [t["amount"] for t in data["transactions"]]
+        self.assertIn(2500.00, amounts)
+        self.assertIn(-45.67, amounts)
 
     def test_transactions_with_data(self):
         tmp = TemporaryDirectory()

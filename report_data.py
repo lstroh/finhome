@@ -242,6 +242,39 @@ def category_transactions(conn, month: str, category: str):
     }
 
 
+def month_transactions(conn, month: str):
+    cur = conn.execute(
+        "SELECT id, date, description, amount, source_account, category "
+        "FROM transactions "
+        "WHERE date LIKE ? "
+        "ORDER BY date, description",
+        (f"{month}%",),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return {"month": month, "empty": True}
+
+    transactions = [
+        {
+            "id": row_id,
+            "date": date,
+            "description": description,
+            "amount": amount,
+            "source_account": source_account,
+            "category": row_category,
+        }
+        for row_id, date, description, amount, source_account, row_category in rows
+    ]
+    total = sum(t["amount"] for t in transactions)
+    return {
+        "month": month,
+        "empty": False,
+        "total": total,
+        "count": len(transactions),
+        "transactions": transactions,
+    }
+
+
 def _escape_like_literal(text: str) -> str:
     """Escape SQLite LIKE wildcards so user input is matched literally."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

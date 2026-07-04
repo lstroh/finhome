@@ -22,6 +22,7 @@ from report_data import (
     list_months,
     month_over_month,
     month_report,
+    month_transactions,
     search_transactions,
     subscriptions,
     summary,
@@ -87,14 +88,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not month or not MONTH_RE.match(month):
                 self._json_error(400, "month must be YYYY-MM")
                 return
-            if not category or not category.strip():
-                self._json_error(400, "category is required")
-                return
-            if len(category) > MAX_CATEGORY_LEN:
-                self._json_error(400, "category too long")
-                return
-            cat = category.strip()
-            self._api(lambda conn: self._json_ok(category_transactions(conn, month, cat)))
+            if category and category.strip():
+                if len(category) > MAX_CATEGORY_LEN:
+                    self._json_error(400, "category too long")
+                    return
+                cat = category.strip()
+                self._api(lambda conn: self._json_ok(category_transactions(conn, month, cat)))
+            else:
+                self._api(lambda conn: self._json_ok(month_transactions(conn, month)))
         elif path == "/api/categories":
             self._api(lambda conn: self._json_ok(category_options(conn)))
         elif path == "/api/search":

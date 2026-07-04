@@ -14,6 +14,7 @@ from report_data import (
     list_months,
     month_over_month,
     month_report,
+    month_transactions,
     search_transactions,
     subscriptions,
     summary,
@@ -191,6 +192,44 @@ class TestCategoryTransactions(unittest.TestCase):
         data = category_transactions(self.conn, "2026-05", "Subscriptions")
         self.assertFalse(data["empty"])
         self.assertEqual(data["count"], 1)
+
+
+class TestMonthTransactions(unittest.TestCase):
+    def setUp(self):
+        self.conn = make_test_conn()
+        insert_row(self.conn, "2026-05-03", "TESCO", -45.67, "Groceries", "credit_card")
+        insert_row(self.conn, "2026-05-10", "SAINSBURY", -30.00, "Groceries", "credit_card")
+        insert_row(self.conn, "2026-05-12", "SALARY", 2500.00, "Income", "current_account")
+        insert_row(self.conn, "2026-05-15", "NETFLIX", -9.99, "Subscriptions")
+        insert_row(self.conn, "2026-06-01", "OTHER", -5.00, "Shopping")
+        self.conn.commit()
+
+    def test_returns_all_rows_for_month(self):
+        data = month_transactions(self.conn, "2026-05")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["count"], 4)
+        self.assertEqual(len(data["transactions"]), 4)
+
+    def test_includes_income_and_spending(self):
+        data = month_transactions(self.conn, "2026-05")
+        amounts = [t["amount"] for t in data["transactions"]]
+        self.assertIn(2500.00, amounts)
+        self.assertIn(-45.67, amounts)
+
+    def test_total_and_count(self):
+        data = month_transactions(self.conn, "2026-05")
+        expected_total = sum(t["amount"] for t in data["transactions"])
+        self.assertAlmostEqual(data["total"], expected_total)
+        self.assertAlmostEqual(data["total"], 2500.00 - 45.67 - 30.00 - 9.99)
+
+    def test_empty_month(self):
+        data = month_transactions(self.conn, "2026-01")
+        self.assertTrue(data["empty"])
+
+    def test_excludes_other_months(self):
+        data = month_transactions(self.conn, "2026-05")
+        descriptions = [t["description"] for t in data["transactions"]]
+        self.assertNotIn("OTHER", descriptions)
 
 
 class TestCategoryOptions(unittest.TestCase):
