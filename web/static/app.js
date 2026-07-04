@@ -9,7 +9,13 @@ const state = {
   uncategorised: null,
   categoryOptions: [],
   uncategorisedSort: { key: "description", asc: true },
-  drilldown: { month: null, category: null, data: null, loading: false },
+  drilldown: {
+    month: null,
+    category: null,
+    data: null,
+    loading: false,
+    selectedSource: null,
+  },
   currentMonth: null,
   savingCategoryId: null,
   search: { query: "", scope: "month", month: null, year: null, loading: false, data: null },
@@ -27,6 +33,164 @@ function fmtGbp(amount) {
 function fmtPct(value) {
   if (value == null) return "—";
   return Math.abs(value).toFixed(1) + "%";
+}
+
+// Okabe-Ito + Paul Tol Bright — maximally distinct hues, colorblind-safe.
+// Ordered so the first few colours have the highest pairwise contrast.
+const SOURCE_COLOR_PALETTE = [
+  "#0072B2", // blue
+  "#D55E00", // vermillion
+  "#009E73", // bluish green
+  "#CC79A7", // reddish purple
+  "#E69F00", // orange
+  "#332288", // indigo
+  "#117733", // forest green
+  "#56B4E9", // sky blue
+];
+
+// Second pass uses entirely different hues (not lighter variants of the first set).
+const SOURCE_COLOR_PALETTE_ALT = [
+  "#EE6677", // coral
+  "#44AA99", // cyan-teal
+  "#AA3377", // magenta
+  "#999933", // olive
+  "#661100", // brown-red
+  "#6699CC", // steel blue
+  "#882255", // wine
+  "#DDAA33", // gold
+];
+
+function sourceColor(index) {
+  const slot = index % SOURCE_COLOR_PALETTE.length;
+  const pass = Math.floor(index / SOURCE_COLOR_PALETTE.length);
+  if (pass % 2 === 0) return SOURCE_COLOR_PALETTE[slot];
+  return SOURCE_COLOR_PALETTE_ALT[slot];
+}
+
+function sourceLabel(sourceAccount) {
+  const prefix = "credit_card_";
+  if (sourceAccount.startsWith(prefix)) {
+    return sourceAccount.slice(prefix.length) + " (credit card)";
+  }
+  return sourceAccount;
+}
+
+function buildSourceColorMap(transactions) {
+  const accounts = [...new Set(transactions.map((t) => t.source_account))].sort();
+  const map = {};
+  accounts.forEach((account, index) => {
+    map[account] = {
+      index,
+      color: sourceColor(index),
+      label: sourceLabel(account),
+    };
+  });
+  return map;
+}
+
+function renderSourceLegend(colorMap) {
+  const entries = Object.entries(colorMap).sort((a, b) =>
+    a[1].label.localeCompare(b[1].label)
+  );
+  if (entries.length === 0) return "";
+  const items = entries.map(([, info]) => `
+    <span class="source-legend-item">
+      <span class="source-swatch" style="background: ${info.color}"></span>
+      ${escapeHtml(info.label)}
+    </span>
+  `).join("");
+  return `<div class="source-legend" aria-label="Account colours">${items}</div>`;
+}
+
+function filterTransactionsBySource(transactions, selectedSource) {
+  if (!selectedSource) return transactions;
+  return transactions.filter((t) => t.source_account === selectedSource);
+}
+
+function renderSourceFilterTabs(colorMap, selectedSource) {
+  const entries = Object.entries(colorMap).sort((a, b) =>
+    a[1].label.localeCompare(b[1].label)
+  );
+  if (entries.length <= 1) return "";
+
+  const allActive = selectedSource == null;
+  const allTab = `
+    <button type="button" class="tab${allActive ? " active" : ""}" data-source="" aria-selected="${allActive ? "true" : "false"}">
+      All
+    </button>
+  `;
+  const accountTabs = entries.map(([account, info]) => {
+    const active = selectedSource === account;
+    return `
+      <button type="button" class="tab${active ? " active" : ""}" data-source="${escapeHtml(account)}" aria-selected="${active ? "true" : "false"}" style="${active ? `--tab-accent: ${info.color}` : ""}">
+        <span class="source-swatch" style="background: ${info.color}"></span>
+        ${escapeHtml(info.label)}
+      </button>
+    `;
+  }).join("");
+
+  return `<div class="drilldown-tabs" role="tablist" aria-label="Filter by account">${allTab}${accountTabs}</div>`;
+}
+
+function bindSourceFilterTabs(panel) {
+  panel.querySelectorAll(".drilldown-tabs .tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const source = tab.dataset.source || null;
+      state.drilldown.selectedSource = source;
+      renderDrilldownPanel();
+    });
+  });
+}
+
+function renderTransactionRows(transactions, colorMap) {
+  return transactions.map((t) => {
+    const info = colorMap[t.source_account] || { color: "var(--border)" };
+    return `
+      <tr class="tx-source-row" style="--source-color: ${info.color}">
+        <td>${escapeHtml(t.date)}</td>
+        <td>${escapeHtml(t.description)}</td>
+        <td>${escapeHtml(t.source_account)}</td>
+        <td class="amount">${fmtGbp(t.amount)}</td>
+        <td class="category-cell">${renderCategoryEditor(t)}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function renderTransactionTable(transactions, metaHtml, options = {}) {
+  const { showLegend = true, colorMap: colorMapOverride, total } = options;
+  const colorMap = colorMapOverride || buildSourceColorMap(transactions);
+  const legend = showLegend ? renderSourceLegend(colorMap) : "";
+  const txRows = renderTransactionRows(transactions, colorMap);
+  const footer =
+    total != null
+      ? `<tfoot>
+          <tr class="table-total-row">
+            <td colspan="3"><strong>Total</strong></td>
+            <td class="amount"><strong>${fmtGbp(total)}</strong></td>
+            <td></td>
+          </tr>
+        </tfoot>`
+      : "";
+  return `
+    ${metaHtml}
+    ${legend}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Description</th>
+            <th>Account</th>
+            <th class="amount">Amount</th>
+            <th>Category</th>
+          </tr>
+        </thead>
+        <tbody>${txRows}</tbody>
+        ${footer}
+      </table>
+    </div>
+  `;
 }
 
 function show(id) {
@@ -169,6 +333,7 @@ async function refreshAfterCategoryChange() {
   renderUncategorised(state.uncategorised);
 
   if (drillMonth && drillCategory) {
+    const prevSource = state.drilldown.selectedSource;
     const data = await fetchJson(
       `/api/transactions?month=${encodeURIComponent(drillMonth)}` +
       `&category=${encodeURIComponent(drillCategory)}`
@@ -178,6 +343,7 @@ async function refreshAfterCategoryChange() {
       category: drillCategory,
       data,
       loading: false,
+      selectedSource: prevSource,
     };
     renderDrilldownPanel();
     if (!data.empty && state.currentMonth && !state.currentMonth.empty) {
@@ -275,12 +441,25 @@ function renderCategoryTable(categories) {
 }
 
 function closeDrilldown() {
-  state.drilldown = { month: null, category: null, data: null, loading: false };
+  state.drilldown = {
+    month: null,
+    category: null,
+    data: null,
+    loading: false,
+    selectedSource: null,
+  };
   hide("drilldown-panel");
   document.querySelectorAll(".category-row.selected").forEach((row) => {
     row.classList.remove("selected");
     row.setAttribute("aria-expanded", "false");
   });
+}
+
+function normalizeDrilldownSource(colorMap) {
+  const { selectedSource } = state.drilldown;
+  if (selectedSource && !colorMap[selectedSource]) {
+    state.drilldown.selectedSource = null;
+  }
 }
 
 function renderDrilldownPanel() {
@@ -321,36 +500,23 @@ function renderDrilldownPanel() {
       <p class="muted">No transactions in this category for this month.</p>
     `;
   } else {
-    const txRows = data.transactions.map((t) => `
-      <tr>
-        <td>${escapeHtml(t.date)}</td>
-        <td>${escapeHtml(t.description)}</td>
-        <td>${escapeHtml(t.source_account)}</td>
-        <td class="amount">${fmtGbp(t.amount)}</td>
-        <td class="category-cell">${renderCategoryEditor(t)}</td>
-      </tr>
-    `).join("");
+    const colorMap = buildSourceColorMap(data.transactions);
+    normalizeDrilldownSource(colorMap);
+    const { selectedSource } = state.drilldown;
+    const filtered = filterTransactionsBySource(data.transactions, selectedSource);
+    const count = filtered.length;
+    const total = filtered.reduce((sum, t) => sum + t.amount, 0);
+    const metaHtml = `<p class="drilldown-meta">${count} transaction${count === 1 ? "" : "s"} · Total ${fmtGbp(total)} · Category changes apply to all matching descriptions.</p>`;
+    const tabsHtml = renderSourceFilterTabs(colorMap, selectedSource);
     panel.innerHTML = `
       <div class="drilldown-header">
         <h2>${escapeHtml(data.category)} — ${escapeHtml(data.month)}</h2>
         <button type="button" class="drilldown-close">Close</button>
       </div>
-      <p class="drilldown-meta">${data.count} transaction${data.count === 1 ? "" : "s"} · Total ${fmtGbp(data.total)} · Category changes apply to all matching descriptions.</p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Description</th>
-              <th>Account</th>
-              <th class="amount">Amount</th>
-              <th>Category</th>
-            </tr>
-          </thead>
-          <tbody>${txRows}</tbody>
-        </table>
-      </div>
+      ${tabsHtml}
+      ${renderTransactionTable(filtered, metaHtml, { showLegend: false, colorMap, total })}
     `;
+    bindSourceFilterTabs(panel);
     bindCategoryEditors(panel);
   }
   panel.querySelector(".drilldown-close").addEventListener("click", closeDrilldown);
@@ -375,6 +541,7 @@ async function toggleDrilldown(category) {
     category,
     data: null,
     loading: true,
+    selectedSource: null,
   };
   if (state.currentMonth && !state.currentMonth.empty) {
     renderCategoryTable(state.currentMonth.categories);
@@ -391,6 +558,7 @@ async function toggleDrilldown(category) {
       category,
       data,
       loading: false,
+      selectedSource: null,
     };
     renderDrilldownPanel();
     if (state.currentMonth && !state.currentMonth.empty) {
@@ -688,33 +856,8 @@ function renderSearchResults() {
     return;
   }
 
-  const txRows = data.transactions.map((t) => `
-    <tr>
-      <td>${escapeHtml(t.date)}</td>
-      <td>${escapeHtml(t.description)}</td>
-      <td>${escapeHtml(t.source_account)}</td>
-      <td class="amount">${fmtGbp(t.amount)}</td>
-      <td class="category-cell">${renderCategoryEditor(t)}</td>
-    </tr>
-  `).join("");
-
-  container.innerHTML = `
-    <p class="search-meta">${data.count} transaction${data.count === 1 ? "" : "s"} · Total ${fmtGbp(data.total)} · “${escapeHtml(data.query)}” in ${escapeHtml(scopeText)} · Category changes apply to all matching descriptions.</p>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Description</th>
-            <th>Account</th>
-            <th class="amount">Amount</th>
-            <th>Category</th>
-          </tr>
-        </thead>
-        <tbody>${txRows}</tbody>
-      </table>
-    </div>
-  `;
+  const metaHtml = `<p class="search-meta">${data.count} transaction${data.count === 1 ? "" : "s"} · Total ${fmtGbp(data.total)} · “${escapeHtml(data.query)}” in ${escapeHtml(scopeText)} · Category changes apply to all matching descriptions.</p>`;
+  container.innerHTML = renderTransactionTable(data.transactions, metaHtml);
   bindCategoryEditors(container);
 }
 

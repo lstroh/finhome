@@ -264,6 +264,11 @@ tr:last-child td {
   border-bottom: none;
 }
 
+.drilldown tfoot td {
+  border-top: 2px solid var(--border);
+  border-bottom: none;
+}
+
 .amount {
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -342,6 +347,72 @@ th.amount {
   margin: 0 0 0.75rem;
   font-size: 0.875rem;
   color: var(--muted);
+}
+
+.drilldown-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.drilldown-tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border: none;
+  background: transparent;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+
+.drilldown-tabs .tab:hover {
+  color: var(--text);
+}
+
+.drilldown-tabs .tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--tab-accent, var(--accent));
+  font-weight: 600;
+}
+
+.source-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.source-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.source-swatch {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.tx-source-row {
+  background: color-mix(in srgb, var(--source-color, var(--border)) 14%, var(--surface));
+}
+
+.tx-source-row td:first-child {
+  box-shadow: inset 4px 0 0 var(--source-color, var(--border));
 }
 
 .drilldown .table-wrap {
