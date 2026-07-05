@@ -70,8 +70,36 @@ def _create_db(db_path):
             category TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE category_budgets (
+            category TEXT PRIMARY KEY,
+            monthly_amount REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE import_runs (
+            source_account TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            last_import_at TEXT NOT NULL,
+            last_rows_inserted INTEGER NOT NULL DEFAULT 0,
+            last_rows_skipped INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     conn.commit()
     conn.close()
+
+
+BANK_CSV = (
+    "Transaction Date,Transaction Type,Sort Code,Account Number,"
+    "Transaction Description,Debit Amount,Credit Amount,Balance\n"
+    "15/03/2026,DEB,12-34-56,12345678,TEST MERCHANT,10.00,,1000.00\n"
+)
+
+CREDIT_CSV = (
+    "Date,Description,Amount\n"
+    "20/04/2026,AMAZON,-25.00\n"
+)
 
 
 def _insert_row(conn, date, description, amount, category, account="test"):
@@ -443,6 +471,202 @@ class TestWebServerApi(unittest.TestCase):
         self.assertFalse(month_data["empty"])
         self.assertEqual(month_data["count"], 1)
         self.assertAlmostEqual(month_data["total"], -1218)
+
+    def test_post_category_budget_save_and_clear(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-01", "TESCO", -450, "Groceries")
+        conn.commit()
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/category/budget",
+                {"category": "Groceries", "amount": 400},
+            )
+            vs_status, _, vs_data = _get_json(
+                self.host, self.port, "/api/vs-average?month=2026-05"
+            )
+            clear_status, _, clear_data = _post_json(
+                self.host, self.port, "/api/category/budget",
+                {"category": "Groceries", "amount": None},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertAlmostEqual(data["amount"], -400)
+        self.assertEqual(vs_status, 200)
+        groceries = next(c for c in vs_data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["expected"], -400)
+        self.assertEqual(clear_status, 200)
+        self.assertTrue(clear_data["cleared"])
+
+    def test_post_category_budget_invalid_amount(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/category/budget",
+                {"category": "Groceries", "amount": -50},
+            )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "amount must be zero or positive"})
+
+
+class TestWebServerImport(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.host, cls.port = _start_server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_import_page_returns_html(self):
+        status, content_type, body = _request(self.host, self.port, "/import")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type)
+        self.assertIn(b"Upload CSV", body)
+
+    def test_sources_empty_db(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(self.host, self.port, "/api/sources")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(data[0]["type"], "bank")
+        self.assertEqual(data[1]["type"], "credit_card")
+        self.assertIsNone(data[0]["last_transaction_date"])
+        self.assertIsNone(data[0]["last_import_at"])
+        self.assertEqual(data[0]["transaction_count"], 0)
+
+    def test_post_import_bank_csv(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        data_dir = Path(tmp.name) / "data"
+        (data_dir / "accounts").mkdir(parents=True)
+        (data_dir / "credit_card").mkdir(parents=True)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path), \
+             patch.object(web_server, "DATA_DIR", data_dir):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/import",
+                {"type": "bank", "filename": "test_bank.csv", "content": BANK_CSV},
+            )
+            sources_status, _, sources = _get_json(self.host, self.port, "/api/sources")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["inserted"], 1)
+        self.assertEqual(data["skipped"], 0)
+        self.assertEqual(data["source_type"], "bank")
+        self.assertTrue((data_dir / "accounts" / "test_bank.csv").is_file())
+
+        self.assertEqual(sources_status, 200)
+        bank = next(s for s in sources if s["type"] == "bank")
+        self.assertEqual(bank["last_transaction_date"], "2026-03-15")
+        self.assertIsNotNone(bank["last_import_at"])
+        self.assertEqual(bank["transaction_count"], 1)
+        self.assertEqual(bank["file_count"], 1)
+
+    def test_post_import_credit_card_csv(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        data_dir = Path(tmp.name) / "data"
+        (data_dir / "accounts").mkdir(parents=True)
+        (data_dir / "credit_card").mkdir(parents=True)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path), \
+             patch.object(web_server, "DATA_DIR", data_dir):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/import",
+                {"type": "credit_card", "filename": "card.csv", "content": CREDIT_CSV},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["inserted"], 1)
+        self.assertEqual(data["source_account"], "credit_card_card")
+        self.assertTrue((data_dir / "credit_card" / "card.csv").is_file())
+
+    def test_reupload_skips_duplicates(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        data_dir = Path(tmp.name) / "data"
+        (data_dir / "accounts").mkdir(parents=True)
+        (data_dir / "credit_card").mkdir(parents=True)
+
+        payload = {"type": "bank", "filename": "dup.csv", "content": BANK_CSV}
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path), \
+             patch.object(web_server, "DATA_DIR", data_dir):
+            first_status, _, first = _post_json(self.host, self.port, "/api/import", payload)
+            second_status, _, second = _post_json(self.host, self.port, "/api/import", payload)
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(first["inserted"], 1)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(second["inserted"], 0)
+        self.assertEqual(second["skipped"], 1)
+
+    def test_post_import_invalid_filename(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        data_dir = Path(tmp.name) / "data"
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path), \
+             patch.object(web_server, "DATA_DIR", data_dir):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/import",
+                {"type": "bank", "filename": "../evil.csv", "content": BANK_CSV},
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_post_import_invalid_type(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        data_dir = Path(tmp.name) / "data"
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path), \
+             patch.object(web_server, "DATA_DIR", data_dir):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/import",
+                {"type": "savings", "filename": "test.csv", "content": BANK_CSV},
+            )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "type must be bank or credit_card"})
+
+    def test_post_import_empty_content(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        data_dir = Path(tmp.name) / "data"
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path), \
+             patch.object(web_server, "DATA_DIR", data_dir):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/import",
+                {"type": "bank", "filename": "test.csv", "content": "   "},
+            )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "content is required"})
 
 
 if __name__ == "__main__":

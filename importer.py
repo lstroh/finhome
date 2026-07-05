@@ -17,13 +17,18 @@ Both importers:
 """
 
 import csv
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from db_layer import get_connection, insert_transaction, resolve_category
+from db_layer import get_connection, insert_transaction, record_import_run, resolve_category
 from categoriser import categorise
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_FILENAME_LEN = 200
+SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9._ -]+\.csv$", re.IGNORECASE)
 
 
 def parse_date(raw: str) -> str:
@@ -117,7 +122,15 @@ def import_bank_csv(path: Path, conn) -> dict:
                 errors.append(f"Row {row_num} (date: {row_date}): {e}")
 
     conn.commit()
-    return {"inserted": inserted, "skipped": skipped, "errors": errors}
+    record_import_run(
+        conn,
+        source_account=account,
+        source_type="bank",
+        source_file=f"accounts/{path.name}",
+        inserted=inserted,
+        skipped=skipped,
+    )
+    return {"inserted": inserted, "skipped": skipped, "errors": errors, "source_account": account}
 
 
 def import_credit_card_csv(path: Path, conn, spending_is_positive: bool = None) -> dict:
@@ -147,7 +160,15 @@ def import_credit_card_csv(path: Path, conn, spending_is_positive: bool = None) 
                 errors.append(f"Row {row_num} (date: {row_date}): {e}")
 
     if not rows:
-        return {"inserted": 0, "skipped": 0, "errors": errors}
+        record_import_run(
+            conn,
+            source_account=account,
+            source_type="credit_card",
+            source_file=f"credit_card/{path.name}",
+            inserted=0,
+            skipped=0,
+        )
+        return {"inserted": 0, "skipped": 0, "errors": errors, "source_account": account}
 
     if spending_is_positive is None:
         positive_count = sum(1 for *_, amt in rows if amt > 0)
@@ -166,11 +187,78 @@ def import_credit_card_csv(path: Path, conn, spending_is_positive: bool = None) 
             skipped += 1
 
     conn.commit()
+    record_import_run(
+        conn,
+        source_account=account,
+        source_type="credit_card",
+        source_file=f"credit_card/{path.name}",
+        inserted=inserted,
+        skipped=skipped,
+    )
     return {
         "inserted": inserted,
         "skipped": skipped,
         "errors": errors,
         "detected_spending_is_positive": spending_is_positive,
+        "source_account": account,
+    }
+
+
+def sanitize_upload_filename(filename: str) -> str:
+    """Return a safe basename for an uploaded CSV, or raise ValueError."""
+    if not filename or not isinstance(filename, str):
+        raise ValueError("filename is required")
+    name = Path(filename).name
+    if not name or name != filename.strip() or "/" in filename or "\\" in filename:
+        raise ValueError("filename must be a plain name without path separators")
+    if ".." in name:
+        raise ValueError("filename must not contain '..'")
+    if len(name) > MAX_FILENAME_LEN:
+        raise ValueError(f"filename exceeds maximum length ({MAX_FILENAME_LEN})")
+    if not SAFE_FILENAME_RE.match(name):
+        raise ValueError("filename must end with .csv and contain only safe characters")
+    return name
+
+
+def import_uploaded_csv(source_type: str, filename: str, content: str, data_dir: Path) -> dict:
+    """
+    Save an uploaded CSV under data/ and import it into SQLite.
+    Returns import counts plus source_account and saved filename.
+    """
+    if source_type not in ("bank", "credit_card"):
+        raise ValueError("type must be bank or credit_card")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("content is required")
+
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"file exceeds maximum size ({MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+
+    safe_name = sanitize_upload_filename(filename)
+    target_dir = data_dir / ("accounts" if source_type == "bank" else "credit_card")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = (target_dir / safe_name).resolve()
+    if not str(target_path).startswith(str(target_dir.resolve())):
+        raise ValueError("invalid filename")
+
+    target_path.write_text(content, encoding="utf-8", newline="")
+
+    conn = get_connection()
+    try:
+        if source_type == "bank":
+            result = import_bank_csv(target_path, conn)
+        else:
+            result = import_credit_card_csv(target_path, conn)
+    finally:
+        conn.close()
+
+    return {
+        "source_account": result["source_account"],
+        "source_type": source_type,
+        "filename": safe_name,
+        "inserted": result["inserted"],
+        "skipped": result["skipped"],
+        "errors": result["errors"],
     }
 
 

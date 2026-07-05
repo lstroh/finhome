@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db_layer import make_hash
+from db_layer import make_hash, set_category_budget
 from report_data import (
     category_options,
     category_transactions,
@@ -15,10 +15,12 @@ from report_data import (
     month_over_month,
     month_report,
     month_transactions,
+    month_vs_year_avg,
     search_transactions,
     subscriptions,
     summary,
     uncategorised,
+    year_avg_baseline,
 )
 
 
@@ -34,6 +36,12 @@ def make_test_conn():
             category TEXT NOT NULL,
             balance REAL,
             raw_hash TEXT UNIQUE NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE category_budgets (
+            category TEXT PRIMARY KEY,
+            monthly_amount REAL NOT NULL
         )
     """)
     return conn
@@ -131,6 +139,132 @@ class TestMonthOverMonth(unittest.TestCase):
         conn.commit()
         data = month_over_month(conn)
         self.assertEqual(data["anomalies"], [])
+
+
+class TestYearAvgBaseline(unittest.TestCase):
+    def test_12_month_groceries_average(self):
+        conn = make_test_conn()
+        for i in range(12):
+            month = f"2025-{i + 1:02d}"
+            insert_row(conn, f"{month}-01", "TESCO", -200, "Groceries")
+        conn.commit()
+        data = year_avg_baseline(conn)
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["month_count"], 12)
+        self.assertEqual(data["window_start"], "2025-01")
+        self.assertEqual(data["window_end"], "2025-12")
+        self.assertAlmostEqual(data["category_avgs"]["Groceries"], -200)
+        self.assertAlmostEqual(data["total_spend_avg"], -200)
+
+    def test_partial_window(self):
+        conn = make_test_conn()
+        for m in ["2026-04", "2026-05", "2026-06"]:
+            insert_row(conn, f"{m}-01", "TESCO", -300, "Groceries")
+        conn.commit()
+        data = year_avg_baseline(conn)
+        self.assertEqual(data["month_count"], 3)
+        self.assertAlmostEqual(data["category_avgs"]["Groceries"], -300)
+
+    def test_excludes_transfer_counts_income(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        insert_row(conn, "2026-05-02", "F/FLOW", -500, "Transfer")
+        insert_row(conn, "2026-05-03", "SALARY", 3000, "Income")
+        insert_row(conn, "2026-06-01", "SALARY", 3000, "Income")
+        conn.commit()
+        data = year_avg_baseline(conn)
+        self.assertNotIn("Transfer", data["category_avgs"])
+        self.assertAlmostEqual(data["income_avg"], 3000)
+        self.assertAlmostEqual(data["total_spend_avg"], -50)
+
+    def test_empty_db(self):
+        conn = make_test_conn()
+        self.assertTrue(year_avg_baseline(conn)["empty"])
+
+
+class TestMonthVsYearAvg(unittest.TestCase):
+    def test_selected_month_comparison(self):
+        conn = make_test_conn()
+        for m, amt in [("2026-04", -300), ("2026-05", -300), ("2026-06", -400)]:
+            insert_row(conn, f"{m}-01", "TESCO", amt, "Groceries")
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-06")
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["selected_month"], "2026-06")
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["selected"], -400)
+        self.assertAlmostEqual(groceries["average"], -1000 / 3)
+        self.assertAlmostEqual(groceries["diff"], -400 - (-1000 / 3))
+        expected_pct = (400 - 1000 / 3) / (1000 / 3) * 100
+        self.assertAlmostEqual(groceries["diff_pct"], expected_pct)
+
+    def test_empty_selected_month(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -300, "Groceries")
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-01")
+        self.assertFalse(data["empty"])
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["selected"], 0)
+        self.assertAlmostEqual(groceries["average"], -300)
+        self.assertAlmostEqual(data["income"]["selected"], 0)
+        self.assertAlmostEqual(data["total_spend"]["selected"], 0)
+
+    def test_income_comparison(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-04-01", "SALARY", 4000, "Income")
+        insert_row(conn, "2026-05-01", "SALARY", 2000, "Income")
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-05")
+        self.assertAlmostEqual(data["income"]["selected"], 2000)
+        self.assertAlmostEqual(data["income"]["average"], 3000)
+        self.assertAlmostEqual(data["income"]["diff"], -1000)
+        self.assertAlmostEqual(data["income"]["diff_pct"], -1000 / 3000 * 100)
+
+    def test_uses_fixed_latest_window(self):
+        conn = make_test_conn()
+        for m in ["2026-04", "2026-05", "2026-06"]:
+            insert_row(conn, f"{m}-01", "TESCO", -100, "Groceries")
+        conn.commit()
+        data_old = month_vs_year_avg(conn, "2026-04")
+        data_new = month_vs_year_avg(conn, "2026-06")
+        self.assertEqual(data_old["window_end"], data_new["window_end"])
+        self.assertAlmostEqual(data_old["categories"][0]["average"], -100)
+
+    def test_expected_budget_fields(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -450, "Groceries")
+        set_category_budget(conn, "Groceries", -400)
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-05")
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["expected"], -400)
+        self.assertAlmostEqual(groceries["expected_diff"], -50)
+        self.assertAlmostEqual(groceries["expected_diff_pct"], 12.5)
+
+    def test_budget_only_category_appears(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        set_category_budget(conn, "Subscriptions", -30)
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-05")
+        names = [c["name"] for c in data["categories"]]
+        self.assertIn("Subscriptions", names)
+        subs = next(c for c in data["categories"] if c["name"] == "Subscriptions")
+        self.assertAlmostEqual(subs["selected"], 0)
+        self.assertAlmostEqual(subs["expected"], -30)
+
+    def test_budget_total_sums_set_budgets(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -450, "Groceries")
+        insert_row(conn, "2026-05-02", "NETFLIX", -15, "Subscriptions")
+        set_category_budget(conn, "Groceries", -400)
+        set_category_budget(conn, "Subscriptions", -30)
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-05")
+        self.assertAlmostEqual(data["budget_total"]["expected"], -430)
+        self.assertAlmostEqual(data["budget_total"]["expected_diff"], -35)
+        self.assertAlmostEqual(data["total_spend"]["selected"], -465)
 
 
 class TestUncategorised(unittest.TestCase):

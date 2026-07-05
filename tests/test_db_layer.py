@@ -9,10 +9,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from categoriser import categorise
 from db_layer import (
+    clear_category_budget,
+    get_category_budgets,
     get_category_override,
     make_hash,
     normalize_description,
     resolve_category,
+    set_category_budget,
     set_category_override,
     update_category_for_description,
 )
@@ -36,6 +39,12 @@ def make_test_conn():
         CREATE TABLE category_overrides (
             description_key TEXT PRIMARY KEY,
             category TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE category_budgets (
+            category TEXT PRIMARY KEY,
+            monthly_amount REAL NOT NULL
         )
     """)
     return conn
@@ -81,6 +90,20 @@ class TestCategoryOverrides(unittest.TestCase):
         conn.commit()
         self.assertEqual(resolve_category(conn, "my merchant", categorise), "Shopping")
         self.assertEqual(resolve_category(conn, "UNKNOWN SHOP", categorise), "Uncategorised")
+
+
+class TestCategoryBudgets(unittest.TestCase):
+    def test_set_get_and_clear(self):
+        conn = make_test_conn()
+        set_category_budget(conn, "Groceries", -400)
+        budgets = get_category_budgets(conn)
+        self.assertAlmostEqual(budgets["Groceries"], -400)
+
+        set_category_budget(conn, "Groceries", -350)
+        self.assertAlmostEqual(get_category_budgets(conn)["Groceries"], -350)
+
+        clear_category_budget(conn, "Groceries")
+        self.assertEqual(get_category_budgets(conn), {})
 
 
 if __name__ == "__main__":

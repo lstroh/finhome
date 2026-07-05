@@ -7,6 +7,7 @@ and web_server.py (JSON API).
 
 from collections import defaultdict
 
+from db_layer import get_category_budgets
 from rules.categories import (
     CATEGORY_RULES,
     NON_SPENDING_CATEGORIES,
@@ -200,6 +201,166 @@ def month_over_month(conn):
     }
 
 
+def _compare_metric(selected, average, spending=False):
+    diff = selected - average
+    if spending:
+        if average == 0:
+            diff_pct = None
+        else:
+            diff_pct = (abs(selected) - abs(average)) / abs(average) * 100
+    else:
+        if average == 0:
+            diff_pct = None
+        else:
+            diff_pct = (selected - average) / average * 100
+    return {
+        "selected": selected,
+        "average": average,
+        "diff": diff,
+        "diff_pct": diff_pct,
+    }
+
+
+def _expected_fields(selected, expected):
+    if expected is None:
+        return {
+            "expected": None,
+            "expected_diff": None,
+            "expected_diff_pct": None,
+        }
+    diff = selected - expected
+    if expected == 0:
+        diff_pct = None
+    else:
+        diff_pct = (abs(selected) - abs(expected)) / abs(expected) * 100
+    return {
+        "expected": expected,
+        "expected_diff": diff,
+        "expected_diff_pct": diff_pct,
+    }
+
+
+def year_avg_baseline(conn):
+    """
+    Fixed monthly averages over the most recent 12 months in the database.
+    Months with no activity count as zero for that category/income/total.
+    """
+    rows = get_all_transactions(conn)
+    if not rows:
+        return {"empty": True}
+
+    months = list_months(conn)
+    window = months[-12:]
+    month_count = len(window)
+    if month_count == 0:
+        return {"empty": False, "insufficient_data": True}
+
+    monthly_spend = defaultdict(lambda: defaultdict(float))
+    monthly_income = defaultdict(float)
+    for _, date, desc, amount, account, category, balance in rows:
+        mk = month_key(date)
+        if mk not in window:
+            continue
+        if amount < 0 and category not in NON_SPENDING_CATEGORIES:
+            monthly_spend[mk][category] += amount
+        if category == "Income" and amount > 0:
+            monthly_income[mk] += amount
+
+    all_categories = sorted(set(
+        cat for m in monthly_spend.values() for cat in m.keys()
+    ))
+
+    category_avgs = {}
+    for cat in all_categories:
+        total = sum(monthly_spend[m].get(cat, 0) for m in window)
+        category_avgs[cat] = total / month_count
+
+    total_spend_avg = sum(
+        sum(monthly_spend[m].values()) for m in window
+    ) / month_count
+    income_avg = sum(monthly_income[m] for m in window) / month_count
+
+    return {
+        "empty": False,
+        "insufficient_data": False,
+        "window_start": window[0],
+        "window_end": window[-1],
+        "month_count": month_count,
+        "category_avgs": category_avgs,
+        "total_spend_avg": total_spend_avg,
+        "income_avg": income_avg,
+    }
+
+
+def month_vs_year_avg(conn, target_month: str):
+    baseline = year_avg_baseline(conn)
+    if baseline.get("empty"):
+        return {"empty": True}
+    if baseline.get("insufficient_data"):
+        return {
+            "empty": False,
+            "insufficient_data": True,
+            "selected_month": target_month,
+        }
+
+    selected = month_report(conn, target_month)
+    if selected.get("empty"):
+        selected_spend_by_cat = {}
+        selected_total_spend = 0.0
+        selected_income = 0.0
+    else:
+        selected_spend_by_cat = {c["name"]: c["amount"] for c in selected["categories"]}
+        selected_total_spend = selected["total_spend"]
+        selected_income = selected["income"]
+
+    budgets = get_category_budgets(conn)
+
+    all_categories = sorted(
+        set(baseline["category_avgs"].keys())
+        | set(selected_spend_by_cat.keys())
+        | set(budgets.keys()),
+        key=lambda cat: selected_spend_by_cat.get(cat, 0),
+    )
+
+    categories = []
+    for cat in all_categories:
+        sel = selected_spend_by_cat.get(cat, 0.0)
+        avg = baseline["category_avgs"].get(cat, 0.0)
+        categories.append({
+            "name": cat,
+            **_compare_metric(sel, avg, spending=True),
+            **_expected_fields(sel, budgets.get(cat)),
+        })
+
+    if budgets:
+        total_expected = sum(budgets.values())
+        budget_total = {
+            "expected": total_expected,
+            **_expected_fields(selected_total_spend, total_expected),
+        }
+    else:
+        budget_total = {
+            "expected": None,
+            "expected_diff": None,
+            "expected_diff_pct": None,
+        }
+
+    return {
+        "empty": False,
+        "insufficient_data": False,
+        "selected_month": target_month,
+        "window_start": baseline["window_start"],
+        "window_end": baseline["window_end"],
+        "month_count": baseline["month_count"],
+        "income": _compare_metric(selected_income, baseline["income_avg"], spending=False),
+        "total_spend": _compare_metric(
+            selected_total_spend, baseline["total_spend_avg"], spending=True
+        ),
+        "budget_total": budget_total,
+        "categories": categories,
+    }
+
+
 def category_options(conn):
     """Categories for UI dropdowns: rules, DB values, and Uncategorised."""
     cur = conn.execute("SELECT DISTINCT category FROM transactions ORDER BY category")
@@ -377,6 +538,46 @@ def subscriptions(conn):
         "estimated_monthly": estimated_monthly,
         "estimated_yearly": estimated_monthly * 12,
     }
+
+
+def source_status(conn):
+    """Return aggregated status for bank and credit card sources."""
+    tx_stats = {}
+    for source_type, is_credit in (("bank", False), ("credit_card", True)):
+        if is_credit:
+            where = "WHERE source_account LIKE 'credit_card_%'"
+        else:
+            where = "WHERE source_account NOT LIKE 'credit_card_%'"
+        row = conn.execute(
+            f"SELECT MAX(date), COUNT(*), COUNT(DISTINCT source_account) "
+            f"FROM transactions {where}"
+        ).fetchone()
+        tx_stats[source_type] = {
+            "last_transaction_date": row[0],
+            "transaction_count": row[1] or 0,
+            "file_count": row[2] or 0,
+        }
+
+    import_stats = {}
+    rows = conn.execute(
+        "SELECT source_type, MAX(last_import_at) FROM import_runs GROUP BY source_type"
+    ).fetchall()
+    for source_type, last_import_at in rows:
+        import_stats[source_type] = last_import_at
+
+    labels = {"bank": "Bank", "credit_card": "Credit card"}
+    result = []
+    for source_type in ("bank", "credit_card"):
+        tx = tx_stats[source_type]
+        result.append({
+            "type": source_type,
+            "label": labels[source_type],
+            "last_transaction_date": tx["last_transaction_date"],
+            "last_import_at": import_stats.get(source_type),
+            "transaction_count": tx["transaction_count"],
+            "file_count": tx["file_count"],
+        })
+    return result
 
 
 def summary(conn):

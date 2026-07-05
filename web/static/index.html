@@ -10,11 +10,16 @@
   <header class="site-header">
     <h1>Finance Tracker</h1>
     <p class="subtitle">Local dashboard — data never leaves this machine</p>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/" class="active" aria-current="page">Dashboard</a>
+      <a href="/import">Import data</a>
+    </nav>
   </header>
 
   <nav class="tabs" role="tablist">
     <button class="tab active" data-view="overview" role="tab" aria-selected="true">Overview</button>
     <button class="tab" data-view="trends" role="tab" aria-selected="false">Trends</button>
+    <button class="tab" data-view="vs-average" role="tab" aria-selected="false">vs Average</button>
     <button class="tab" data-view="subscriptions" role="tab" aria-selected="false">Subscriptions</button>
     <button class="tab" data-view="search" role="tab" aria-selected="false">Search</button>
     <button class="tab" data-view="transactions" role="tab" aria-selected="false">Transactions</button>
@@ -45,6 +50,14 @@
 
     <section id="view-trends" class="view hidden">
       <div id="trends-content"></div>
+    </section>
+
+    <section id="view-vs-average" class="view hidden">
+      <div class="toolbar">
+        <label for="vs-average-month-select">Month</label>
+        <select id="vs-average-month-select"></select>
+      </div>
+      <div id="vs-average-content"></div>
     </section>
 
     <section id="view-subscriptions" class="view hidden">

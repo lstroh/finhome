@@ -15,7 +15,16 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db_layer import DB_PATH, get_connection, get_transaction_by_id, update_category_for_description
+from db_layer import (
+    DB_PATH,
+    MAX_BUDGET_AMOUNT,
+    clear_category_budget,
+    get_connection,
+    get_transaction_by_id,
+    set_category_budget,
+    update_category_for_description,
+)
+from importer import import_uploaded_csv
 from report_data import (
     category_options,
     category_transactions,
@@ -23,17 +32,21 @@ from report_data import (
     month_over_month,
     month_report,
     month_transactions,
+    month_vs_year_avg,
     search_transactions,
+    source_status,
     subscriptions,
     summary,
     uncategorised,
 )
 
 STATIC_DIR = (Path(__file__).parent / "web" / "static").resolve()
+DATA_DIR = (Path(__file__).parent / "data").resolve()
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 YEAR_RE = re.compile(r"^\d{4}$")
 MAX_CATEGORY_LEN = 100
 MAX_SEARCH_QUERY_LEN = 200
+MAX_IMPORT_BODY_BYTES = 6 * 1024 * 1024
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -54,6 +67,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if path == "/api/transaction/category":
             self._post_transaction_category()
+        elif path == "/api/category/budget":
+            self._post_category_budget()
+        elif path == "/api/import":
+            self._post_import_csv()
         else:
             self._json_error(404, "not found")
 
@@ -64,6 +81,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if path == "/":
             self._serve_static("index.html")
+        elif path == "/import":
+            self._serve_static("import.html")
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
         elif path == "/api/months":
@@ -78,6 +97,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._api(lambda conn: self._json_ok(month_report(conn, month)))
         elif path == "/api/trends":
             self._api(lambda conn: self._json_ok(month_over_month(conn)))
+        elif path == "/api/vs-average":
+            month = query.get("month", [None])[0]
+            if not month or not MONTH_RE.match(month):
+                self._json_error(400, "month must be YYYY-MM")
+                return
+            self._api(lambda conn: self._json_ok(month_vs_year_avg(conn, month)))
         elif path == "/api/subscriptions":
             self._api(lambda conn: self._json_ok(subscriptions(conn)))
         elif path == "/api/uncategorised":
@@ -100,6 +125,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._api(lambda conn: self._json_ok(category_options(conn)))
         elif path == "/api/search":
             self._api_search(query)
+        elif path == "/api/sources":
+            self._api_conn(lambda conn: self._json_ok(source_status(conn)))
         else:
             self._json_error(404, "not found")
 
@@ -196,6 +223,124 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _post_category_budget(self):
+        if not DB_PATH.exists():
+            self._json_error(
+                503,
+                "Database not found. Drop CSVs into data/ and run importer.py first.",
+            )
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            self._json_error(400, "request body required")
+            return
+
+        try:
+            body = self.rfile.read(length)
+            payload = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json_error(400, "invalid JSON")
+            return
+
+        if not isinstance(payload, dict):
+            self._json_error(400, "body must be a JSON object")
+            return
+
+        category = payload.get("category")
+        amount = payload.get("amount")
+
+        if not isinstance(category, str) or not category.strip():
+            self._json_error(400, "category is required")
+            return
+
+        category = category.strip()
+        if len(category) > MAX_CATEGORY_LEN:
+            self._json_error(400, "category too long")
+            return
+
+        conn = get_connection()
+        try:
+            if amount is None:
+                clear_category_budget(conn, category)
+                self._json_ok({"cleared": True, "category": category})
+                return
+
+            if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+                self._json_error(400, "amount must be a number or null")
+                return
+
+            amount = float(amount)
+            if amount < 0:
+                self._json_error(400, "amount must be zero or positive")
+                return
+            if amount > MAX_BUDGET_AMOUNT:
+                self._json_error(
+                    400,
+                    f"amount exceeds sanity threshold (£{MAX_BUDGET_AMOUNT:,.0f})",
+                )
+                return
+
+            if amount == 0:
+                clear_category_budget(conn, category)
+                self._json_ok({"cleared": True, "category": category})
+                return
+
+            stored = -amount
+            set_category_budget(conn, category, stored)
+            self._json_ok({
+                "category": category,
+                "amount": stored,
+                "amount_display": amount,
+            })
+        finally:
+            conn.close()
+
+    def _post_import_csv(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            self._json_error(400, "request body required")
+            return
+        if length > MAX_IMPORT_BODY_BYTES:
+            self._json_error(400, "request body too large")
+            return
+
+        try:
+            body = self.rfile.read(length)
+            payload = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json_error(400, "invalid JSON")
+            return
+
+        if not isinstance(payload, dict):
+            self._json_error(400, "body must be a JSON object")
+            return
+
+        source_type = payload.get("type")
+        filename = payload.get("filename")
+        content = payload.get("content")
+
+        if not isinstance(source_type, str) or source_type not in ("bank", "credit_card"):
+            self._json_error(400, "type must be bank or credit_card")
+            return
+        if not isinstance(filename, str) or not filename.strip():
+            self._json_error(400, "filename is required")
+            return
+        if not isinstance(content, str) or not content.strip():
+            self._json_error(400, "content is required")
+            return
+
+        try:
+            result = import_uploaded_csv(source_type, filename, content, DATA_DIR)
+        except ValueError as exc:
+            self._json_error(400, str(exc))
+            return
+        except Exception:
+            self._json_error(500, "import failed")
+            return
+
+        self._json_ok(result)
+
     def _api(self, handler):
         if not DB_PATH.exists():
             self._json_error(
@@ -203,6 +348,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "Database not found. Drop CSVs into data/ and run importer.py first.",
             )
             return
+        conn = get_connection()
+        try:
+            handler(conn)
+        finally:
+            conn.close()
+
+    def _api_conn(self, handler):
+        """Run a handler with a DB connection (creates DB/schema if missing)."""
         conn = get_connection()
         try:
             handler(conn)
@@ -257,7 +410,7 @@ def main():
     url = f"http://127.0.0.1:{args.port}"
     print(f"Finance dashboard running at {url}")
     print("Data stays on this machine — bound to 127.0.0.1 only.")
-    print("API includes /api/transactions (category drill-down) and POST /api/transaction/category.")
+    print("API includes /api/transactions, POST /api/import, and GET /api/sources.")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

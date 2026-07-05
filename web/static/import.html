@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Import Data — Finance Tracker</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <h1>Finance Tracker</h1>
+    <p class="subtitle">Local dashboard — data never leaves this machine</p>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/">Dashboard</a>
+      <a href="/import" class="active" aria-current="page">Import data</a>
+    </nav>
+  </header>
+
+  <main id="import-app" class="import-page">
+    <div id="import-loading" class="loading">Loading…</div>
+    <div id="import-error" class="error hidden" role="alert"></div>
+
+    <section id="import-upload" class="import-section hidden">
+      <h2>Upload CSV</h2>
+      <p class="muted">Import bank or credit card exports. Files are saved locally under <code>data/</code> and merged into your database.</p>
+      <form id="import-form" class="import-form">
+        <div class="form-row">
+          <label for="import-type">Account type</label>
+          <select id="import-type" name="type" required>
+            <option value="bank">Bank</option>
+            <option value="credit_card">Credit card</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="import-file">CSV file</label>
+          <input type="file" id="import-file" name="file" accept=".csv,text/csv" required>
+        </div>
+        <button type="submit" id="import-submit" class="import-submit">Upload and import</button>
+      </form>
+      <div id="import-result" class="import-result hidden" role="status"></div>
+    </section>
+
+    <section id="import-status" class="import-section hidden">
+      <h2>Data sources</h2>
+      <p class="muted">Latest transaction date and last upload time per account type.</p>
+      <div id="sources-table" class="table-wrap"></div>
+    </section>
+  </main>
+
+  <script src="/static/import.js"></script>
+</body>
+</html>

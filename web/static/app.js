@@ -21,6 +21,8 @@ const state = {
   savingCategoryId: null,
   search: { query: "", scope: "month", month: null, year: null, loading: false, data: null, sort: { key: "date", asc: true } },
   transactions: { month: null, data: null, loading: false, selectedSource: null, sort: { key: "date", asc: true } },
+  vsAverage: { month: null, data: null, loading: false },
+  savingBudgetCategory: null,
 };
 
 function fmtGbp(amount) {
@@ -35,6 +37,30 @@ function fmtGbp(amount) {
 function fmtPct(value) {
   if (value == null) return "—";
   return Math.abs(value).toFixed(1) + "%";
+}
+
+function fmtDiff(amount) {
+  if (amount == null) return "—";
+  if (amount === 0) return fmtGbp(0);
+  const sign = amount > 0 ? "+" : "-";
+  return sign + "£" + Math.abs(amount).toLocaleString("en-GB", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function fmtDiffPct(value) {
+  if (value == null) return "—";
+  const sign = value > 0 ? "+" : value < 0 ? "" : "";
+  return sign + value.toFixed(1) + "%";
+}
+
+function vsAvgHighlight(diffPct, diff) {
+  if (diffPct == null) return "";
+  if (Math.abs(diffPct) >= 30 && Math.abs(diff) > 20) {
+    return diffPct > 0 ? "anomaly up" : "anomaly down";
+  }
+  return "";
 }
 
 function amountClass(amount) {
@@ -397,6 +423,18 @@ async function refreshAfterCategoryChange() {
   renderTrends(state.trends || { empty: true });
   renderSubscriptions(state.subscriptions);
   renderUncategorised(state.uncategorised);
+
+  if (state.vsAverage.month) {
+    try {
+      const vsData = await fetchJson(
+        `/api/vs-average?month=${encodeURIComponent(state.vsAverage.month)}`
+      );
+      state.vsAverage = { month: state.vsAverage.month, data: vsData, loading: false };
+      renderVsAverageView();
+    } catch {
+      /* keep previous vs-average data on refresh failure */
+    }
+  }
 
   if (drillMonth && drillCategory) {
     const prevSource = state.drilldown.selectedSource;
@@ -906,6 +944,224 @@ function renderTrends(data) {
   `;
 }
 
+function renderVsAverageMonthSelect() {
+  const select = document.getElementById("vs-average-month-select");
+  if (!select) return;
+  select.innerHTML = state.months.map((m) =>
+    `<option value="${escapeHtml(m)}"${m === state.vsAverage.month ? " selected" : ""}>${escapeHtml(m)}</option>`
+  ).join("");
+}
+
+function renderVsAverage(data) {
+  const el = document.getElementById("vs-average-content");
+  if (data.empty) {
+    el.innerHTML = '<p class="muted">No data imported yet.</p>';
+    return;
+  }
+  if (data.insufficient_data) {
+    el.innerHTML = '<p class="muted">Not enough data to compute a 12-month average.</p>';
+    return;
+  }
+
+  let windowLabel;
+  if (data.month_count === 1) {
+    windowLabel = `${data.window_start} (1 month)`;
+  } else if (data.month_count < 12) {
+    windowLabel = `${data.window_start} to ${data.window_end} (${data.month_count} of 12 months in your data)`;
+  } else {
+    windowLabel = `${data.window_start} to ${data.window_end} (${data.month_count} months)`;
+  }
+
+  function summaryCard(label, metric, spending) {
+    const highlight = spending
+      ? vsAvgHighlight(metric.diff_pct, metric.diff)
+      : vsAvgHighlight(metric.diff_pct, metric.diff);
+    return `
+      <div class="card">
+        <div class="card-label">${escapeHtml(label)}</div>
+        <div class="card-value ${spending ? "negative" : "positive"}">${fmtGbp(metric.selected)}</div>
+        <div class="card-sub muted">12-mo avg ${fmtGbp(metric.average)}</div>
+        <div class="card-sub ${highlight}">${fmtDiff(metric.diff)} (${fmtDiffPct(metric.diff_pct)})</div>
+      </div>
+    `;
+  }
+
+  const rows = data.categories.map((cat) => {
+    const avgHighlight = vsAvgHighlight(cat.diff_pct, cat.diff);
+    const budgetHighlight = cat.expected != null
+      ? vsAvgHighlight(cat.expected_diff_pct, cat.expected_diff)
+      : "";
+    const displayBudget = cat.expected != null ? Math.abs(cat.expected) : "";
+    const saving = state.savingBudgetCategory === cat.name;
+    const budgetVs = cat.expected != null
+      ? `${fmtDiff(cat.expected_diff)} (${fmtDiffPct(cat.expected_diff_pct)})`
+      : "—";
+    return `
+      <tr class="${avgHighlight}">
+        <td>${escapeHtml(cat.name)}</td>
+        <td class="amount negative">${fmtGbp(cat.selected)}</td>
+        <td class="amount">${fmtGbp(cat.average)}</td>
+        <td class="amount budget-cell">
+          <input type="number" class="budget-input" min="0" step="0.01"
+            data-category="${escapeHtml(cat.name)}"
+            data-original="${displayBudget}"
+            value="${displayBudget}"
+            placeholder="—"
+            aria-label="Expected monthly budget for ${escapeHtml(cat.name)}"
+            ${saving ? "disabled" : ""}>
+        </td>
+        <td class="amount ${budgetHighlight}">${budgetVs}</td>
+        <td class="amount">${fmtDiff(cat.diff)}</td>
+        <td class="amount">${fmtDiffPct(cat.diff_pct)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  const total = data.total_spend;
+  const budgetTotal = data.budget_total || {};
+  const totalAvgHighlight = vsAvgHighlight(total.diff_pct, total.diff);
+  const totalBudgetHighlight = budgetTotal.expected != null
+    ? vsAvgHighlight(budgetTotal.expected_diff_pct, budgetTotal.expected_diff)
+    : "";
+  const totalBudgetVs = budgetTotal.expected != null
+    ? `${fmtDiff(budgetTotal.expected_diff)} (${fmtDiffPct(budgetTotal.expected_diff_pct)})`
+    : "—";
+  const totalExpected = budgetTotal.expected != null
+    ? fmtGbp(budgetTotal.expected)
+    : "—";
+
+  const footer = data.categories.length ? `
+    <tfoot>
+      <tr class="total-row">
+        <td><strong>TOTAL</strong></td>
+        <td class="amount negative"><strong>${fmtGbp(total.selected)}</strong></td>
+        <td class="amount"><strong>${fmtGbp(total.average)}</strong></td>
+        <td class="amount"><strong>${totalExpected}</strong></td>
+        <td class="amount ${totalBudgetHighlight}"><strong>${totalBudgetVs}</strong></td>
+        <td class="amount ${totalAvgHighlight}"><strong>${fmtDiff(total.diff)}</strong></td>
+        <td class="amount"><strong>${fmtDiffPct(total.diff_pct)}</strong></td>
+      </tr>
+    </tfoot>
+  ` : "";
+
+  el.innerHTML = `
+    <p class="muted">12-month average: ${escapeHtml(windowLabel)} — baseline is fixed to the most recent months; only the selected month column changes.</p>
+    <div class="cards vs-average-cards">
+      ${summaryCard("Income", data.income, false)}
+      ${summaryCard("Total spend", data.total_spend, true)}
+    </div>
+    <h2>Spending by category vs average</h2>
+    <p class="muted category-hint">Enter an expected monthly amount per category — saved locally in your database.</p>
+    <div class="table-wrap">
+      <table id="vs-average-table">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th class="amount">${escapeHtml(data.selected_month)}</th>
+            <th class="amount">12-mo avg</th>
+            <th class="amount">Expected</th>
+            <th class="amount">vs budget</th>
+            <th class="amount">Difference</th>
+            <th class="amount">vs avg</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="7" class="muted">No spending categories.</td></tr>'}</tbody>
+        ${footer}
+      </table>
+    </div>
+  `;
+  bindBudgetInputs(el);
+}
+
+async function saveCategoryBudget(category, rawValue, originalValue) {
+  const trimmed = String(rawValue).trim();
+  const originalTrimmed = String(originalValue).trim();
+  if (trimmed === originalTrimmed) return;
+
+  let payload;
+  if (trimmed === "") {
+    payload = { category, amount: null };
+  } else {
+    const amount = parseFloat(trimmed);
+    if (Number.isNaN(amount) || amount < 0) {
+      setError("Budget must be a zero or positive number.");
+      return;
+    }
+    payload = { category, amount };
+  }
+
+  state.savingBudgetCategory = category;
+  renderVsAverageView();
+
+  try {
+    await fetchJson("/api/category/budget", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    clearError();
+    if (state.vsAverage.month) {
+      await loadVsAverageMonth(state.vsAverage.month);
+    }
+  } catch (err) {
+    state.savingBudgetCategory = null;
+    renderVsAverageView();
+    setError(err.message);
+  }
+}
+
+function bindBudgetInputs(container) {
+  container.querySelectorAll(".budget-input").forEach((input) => {
+    const save = () => {
+      saveCategoryBudget(
+        input.dataset.category,
+        input.value,
+        input.dataset.original
+      );
+    };
+    input.addEventListener("blur", save);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        input.blur();
+      }
+    });
+  });
+}
+
+function renderVsAverageView() {
+  const container = document.getElementById("vs-average-content");
+  if (state.vsAverage.loading) {
+    container.innerHTML = '<p class="muted">Loading…</p>';
+    return;
+  }
+  if (!state.vsAverage.data) {
+    container.innerHTML = '<p class="muted">Select a month to compare against the 12-month average.</p>';
+    return;
+  }
+  renderVsAverage(state.vsAverage.data);
+}
+
+async function loadVsAverageMonth(month) {
+  clearError();
+  state.vsAverage = { month, data: null, loading: true };
+  renderVsAverageMonthSelect();
+  renderVsAverageView();
+
+  try {
+    const data = await fetchJson(
+      `/api/vs-average?month=${encodeURIComponent(month)}`
+    );
+    state.vsAverage = { month, data, loading: false };
+    state.savingBudgetCategory = null;
+    renderVsAverageView();
+  } catch (err) {
+    state.vsAverage = { month, data: null, loading: false };
+    renderVsAverageView();
+    setError(err.message);
+  }
+}
+
 function renderSubscriptions(data) {
   const el = document.getElementById("subscriptions-content");
   if (!data.items.length) {
@@ -1146,6 +1402,10 @@ function switchView(view) {
     const month = state.transactions.month || state.selectedMonth;
     if (month) loadTransactionsMonth(month);
   }
+  if (view === "vs-average" && !state.vsAverage.data && !state.vsAverage.loading) {
+    const month = state.vsAverage.month || state.selectedMonth;
+    if (month) loadVsAverageMonth(month);
+  }
 }
 
 async function loadMonth(month) {
@@ -1183,13 +1443,16 @@ async function init() {
     state.search.month = summary.latest_month;
     state.search.year = uniqueYears(state.months).slice(-1)[0] || null;
     state.transactions.month = summary.latest_month;
+    state.vsAverage.month = summary.latest_month;
     renderSearchSelectors();
     renderSearchResults();
     renderTransactionsMonthSelect();
+    renderVsAverageMonthSelect();
 
     switchView("overview");
     document.querySelectorAll(".view").forEach((v) => v.classList.remove("hidden"));
     hide("view-trends");
+    hide("view-vs-average");
     hide("view-subscriptions");
     hide("view-search");
     hide("view-transactions");
@@ -1232,6 +1495,10 @@ document.getElementById("search-query").addEventListener("keydown", (e) => {
 
 document.getElementById("transactions-month-select").addEventListener("change", (e) => {
   loadTransactionsMonth(e.target.value);
+});
+
+document.getElementById("vs-average-month-select").addEventListener("change", (e) => {
+  loadVsAverageMonth(e.target.value);
 });
 
 init();

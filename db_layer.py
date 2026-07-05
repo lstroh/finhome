@@ -20,9 +20,11 @@ transactions(
 
 import sqlite3
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "db" / "finance.db"
+MAX_BUDGET_AMOUNT = 100_000
 
 
 def normalize_description(description: str) -> str:
@@ -56,8 +58,50 @@ def get_connection():
             category TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS category_budgets (
+            category TEXT PRIMARY KEY,
+            monthly_amount REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS import_runs (
+            source_account TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            last_import_at TEXT NOT NULL,
+            last_rows_inserted INTEGER NOT NULL DEFAULT 0,
+            last_rows_skipped INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     conn.commit()
     return conn
+
+
+def source_type_from_account(source_account: str) -> str:
+    """Derive import source type from source_account naming convention."""
+    if source_account.startswith("credit_card_"):
+        return "credit_card"
+    return "bank"
+
+
+def record_import_run(conn, source_account, source_type, source_file, inserted, skipped):
+    """Upsert metadata for the most recent import of a source file."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    conn.execute(
+        """INSERT INTO import_runs
+           (source_account, source_type, source_file, last_import_at,
+            last_rows_inserted, last_rows_skipped)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source_account) DO UPDATE SET
+             source_type = excluded.source_type,
+             source_file = excluded.source_file,
+             last_import_at = excluded.last_import_at,
+             last_rows_inserted = excluded.last_rows_inserted,
+             last_rows_skipped = excluded.last_rows_skipped""",
+        (source_account, source_type, source_file, now, inserted, skipped),
+    )
+    conn.commit()
 
 
 def make_hash(date, description, amount, source_account):
@@ -146,3 +190,27 @@ def resolve_category(conn, description: str, categorise_fn):
     if override is not None:
         return override
     return categorise_fn(description)
+
+
+def get_category_budgets(conn):
+    """Return {category: monthly_amount} for all set budgets (amounts are negative)."""
+    rows = conn.execute(
+        "SELECT category, monthly_amount FROM category_budgets ORDER BY category"
+    ).fetchall()
+    return {category: amount for category, amount in rows}
+
+
+def set_category_budget(conn, category: str, monthly_amount: float):
+    """Upsert a monthly spending budget (negative amount)."""
+    conn.execute(
+        """INSERT INTO category_budgets (category, monthly_amount)
+           VALUES (?, ?)
+           ON CONFLICT(category) DO UPDATE SET monthly_amount = excluded.monthly_amount""",
+        (category, monthly_amount),
+    )
+    conn.commit()
+
+
+def clear_category_budget(conn, category: str):
+    conn.execute("DELETE FROM category_budgets WHERE category = ?", (category,))
+    conn.commit()
