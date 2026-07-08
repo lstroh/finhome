@@ -19,6 +19,7 @@ from db_layer import (
     DB_PATH,
     MAX_BUDGET_AMOUNT,
     clear_category_budget,
+    delete_transactions,
     get_connection,
     get_transaction_by_id,
     set_category_budget,
@@ -28,6 +29,7 @@ from importer import import_uploaded_csv
 from report_data import (
     category_options,
     category_transactions,
+    find_duplicates,
     list_months,
     month_over_month,
     month_report,
@@ -38,6 +40,7 @@ from report_data import (
     subscriptions,
     summary,
     uncategorised,
+    validate_duplicate_removal,
 )
 
 STATIC_DIR = (Path(__file__).parent / "web" / "static").resolve()
@@ -71,6 +74,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._post_category_budget()
         elif path == "/api/import":
             self._post_import_csv()
+        elif path == "/api/duplicates/remove":
+            self._post_duplicates_remove()
         else:
             self._json_error(404, "not found")
 
@@ -127,6 +132,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._api_search(query)
         elif path == "/api/sources":
             self._api_conn(lambda conn: self._json_ok(source_status(conn)))
+        elif path == "/api/duplicates":
+            self._api(lambda conn: self._json_ok(find_duplicates(conn)))
         else:
             self._json_error(404, "not found")
 
@@ -340,6 +347,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         self._json_ok(result)
+
+    def _post_duplicates_remove(self):
+        if not DB_PATH.exists():
+            self._json_error(
+                503,
+                "Database not found. Drop CSVs into data/ and run importer.py first.",
+            )
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            self._json_error(400, "request body required")
+            return
+
+        try:
+            body = self.rfile.read(length)
+            payload = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json_error(400, "invalid JSON")
+            return
+
+        if not isinstance(payload, dict):
+            self._json_error(400, "body must be a JSON object")
+            return
+
+        ids = payload.get("ids")
+        if ids is None:
+            self._json_error(400, "ids is required")
+            return
+        if not isinstance(ids, list) or not ids:
+            self._json_error(400, "ids must be a non-empty list")
+            return
+
+        for transaction_id in ids:
+            if not isinstance(transaction_id, int) or transaction_id <= 0:
+                self._json_error(400, "ids must be positive integers")
+                return
+
+        conn = get_connection()
+        try:
+            try:
+                validate_duplicate_removal(conn, ids)
+            except ValueError as exc:
+                self._json_error(400, str(exc))
+                return
+
+            removed = delete_transactions(conn, ids)
+            self._json_ok({"removed": removed})
+        finally:
+            conn.close()
 
     def _api(self, handler):
         if not DB_PATH.exists():

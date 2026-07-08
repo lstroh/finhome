@@ -668,6 +668,171 @@ class TestWebServerImport(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(data, {"error": "content is required"})
 
+    def test_get_duplicates_empty_db(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(self.host, self.port, "/api/duplicates")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["group_count"], 0)
+        self.assertEqual(data["extra_row_count"], 0)
+        self.assertEqual(data["groups"], [])
+
+    def test_get_duplicates_returns_groups(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_a")
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_b")
+        conn.commit()
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(self.host, self.port, "/api/duplicates")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["group_count"], 1)
+        self.assertEqual(len(data["groups"][0]["transactions"]), 2)
+
+    def test_post_duplicates_remove(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_a")
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_b")
+        conn.commit()
+        remove_id = conn.execute(
+            "SELECT id FROM transactions WHERE source_account = 'account_a'"
+        ).fetchone()[0]
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/duplicates/remove", {"ids": [remove_id]}
+            )
+            get_status, _, get_data = _get_json(self.host, self.port, "/api/duplicates")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["removed"], 1)
+        self.assertEqual(get_status, 200)
+        self.assertEqual(get_data["group_count"], 0)
+
+    def test_post_duplicates_remove_unknown_id(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/duplicates/remove", {"ids": [999]}
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("unknown transaction id", data["error"])
+
+    def test_post_duplicates_remove_not_duplicate(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-29", "UNIQUE", -10.0, "Shopping", "account_a")
+        conn.commit()
+        tx_id = conn.execute("SELECT id FROM transactions").fetchone()[0]
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/duplicates/remove", {"ids": [tx_id]}
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("is not a duplicate", data["error"])
+
+    def test_post_duplicates_remove_all_copies_rejected(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        _insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_b")
+        conn.commit()
+        ids = [row[0] for row in conn.execute("SELECT id FROM transactions").fetchall()]
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _post_json(
+                self.host, self.port, "/api/duplicates/remove", {"ids": ids}
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("would remove all copies", data["error"])
+
+    def test_remove_duplicate_does_not_double_count_summary(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_a")
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_b")
+        conn.commit()
+        remove_id = conn.execute(
+            "SELECT id FROM transactions WHERE source_account = 'account_a'"
+        ).fetchone()[0]
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            _post_json(self.host, self.port, "/api/duplicates/remove", {"ids": [remove_id]})
+            status, _, data = _get_json(self.host, self.port, "/api/summary")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(data["empty"])
+        self.assertAlmostEqual(data["month"]["total_spend"], -135.0)
+
+    def test_remove_duplicate_preserves_category_overrides(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_a")
+        _insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_b")
+        conn.execute(
+            "INSERT INTO category_overrides (description_key, category) VALUES (?, ?)",
+            ("OCTOPUS ENERGY LTD", "Utilities"),
+        )
+        conn.commit()
+        remove_id = conn.execute(
+            "SELECT id FROM transactions WHERE source_account = 'account_a'"
+        ).fetchone()[0]
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, _ = _post_json(
+                self.host, self.port, "/api/duplicates/remove", {"ids": [remove_id]}
+            )
+
+        self.assertEqual(status, 200)
+        conn = sqlite3.connect(db_path)
+        override = conn.execute(
+            "SELECT category FROM category_overrides WHERE description_key = ?",
+            ("OCTOPUS ENERGY LTD",),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(override)
+        self.assertEqual(override[0], "Utilities")
+
 
 if __name__ == "__main__":
     unittest.main()

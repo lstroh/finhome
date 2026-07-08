@@ -1,3 +1,5 @@
+let duplicatesData = null;
+
 function show(id) {
   document.getElementById(id).classList.remove("hidden");
 }
@@ -47,6 +49,13 @@ function formatDateTime(isoDateTime) {
   });
 }
 
+function formatAmount(amount) {
+  return amount.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function renderSourcesTable(sources) {
   const rows = sources.map((src) => `
     <tr>
@@ -88,16 +97,141 @@ function renderImportResult(result) {
   const moreErrors = result.errors && result.errors.length > 10
     ? `<p class="muted">…and ${result.errors.length - 10} more errors</p>`
     : "";
+  const skippedNote = result.skipped > 0
+    ? `<p class="muted">Rows skipped here were already in this file (same import). <a href="#import-duplicates">Check for cross-file duplicates</a> below if you imported overlapping exports.</p>`
+    : "";
 
   el.innerHTML = `
     <p><strong>${escapeHtml(result.filename)}</strong> imported.</p>
     <p>${result.inserted} new transaction${result.inserted === 1 ? "" : "s"},
        ${result.skipped} duplicate${result.skipped === 1 ? "" : "s"} skipped.</p>
+    ${skippedNote}
     ${errorList}
     ${moreErrors}
     <p class="muted">Refresh the <a href="/">dashboard</a> to see updated reports.</p>
   `;
   show("import-result");
+}
+
+function renderDuplicates(data) {
+  duplicatesData = data;
+  const summaryEl = document.getElementById("duplicates-summary");
+  const tableEl = document.getElementById("duplicates-table");
+  const actionsEl = document.getElementById("duplicates-actions");
+
+  if (!data.group_count) {
+    summaryEl.textContent = "No duplicates found.";
+    tableEl.innerHTML = "";
+    hide("duplicates-actions");
+    return;
+  }
+
+  const groupWord = data.group_count === 1 ? "group" : "groups";
+  const txWord = data.extra_row_count === 1 ? "transaction" : "transactions";
+  summaryEl.textContent =
+    `${data.extra_row_count} duplicate ${txWord} in ${data.group_count} ${groupWord} ` +
+    "(same date, description, and amount from different imports).";
+
+  const rows = data.groups.flatMap((group, groupIndex) => {
+    const { date, description, amount } = group.key;
+    return group.transactions.map((tx, txIndex) => {
+      const groupClass = txIndex === 0 ? "duplicate-group-start" : "";
+      const checked = tx.suggested_keep ? " checked" : "";
+      return `
+        <tr class="${groupClass}">
+          <td>${formatDate(date)}</td>
+          <td>${escapeHtml(description)}</td>
+          <td class="num">${formatAmount(amount)}</td>
+          <td>${escapeHtml(tx.source_account)}</td>
+          <td>${escapeHtml(tx.category)}</td>
+          <td class="num">
+            <input type="radio" name="keep-${groupIndex}" value="${tx.id}"${checked}
+                   aria-label="Keep transaction ${tx.id}">
+          </td>
+        </tr>
+      `;
+    });
+  }).join("");
+
+  tableEl.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Description</th>
+          <th class="num">Amount</th>
+          <th>Source account</th>
+          <th>Category</th>
+          <th class="num">Keep?</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+  show("duplicates-actions");
+}
+
+function getIdsToRemove() {
+  if (!duplicatesData || !duplicatesData.groups.length) {
+    return [];
+  }
+
+  const idsToRemove = [];
+  duplicatesData.groups.forEach((group, groupIndex) => {
+    const selected = document.querySelector(`input[name="keep-${groupIndex}"]:checked`);
+    const keepId = selected ? Number(selected.value) : null;
+    group.transactions.forEach((tx) => {
+      if (tx.id !== keepId) {
+        idsToRemove.push(tx.id);
+      }
+    });
+  });
+  return idsToRemove;
+}
+
+function getSuggestedRemoveIds() {
+  if (!duplicatesData || !duplicatesData.groups.length) {
+    return [];
+  }
+
+  const ids = [];
+  duplicatesData.groups.forEach((group) => {
+    group.transactions.forEach((tx) => {
+      if (!tx.suggested_keep) {
+        ids.push(tx.id);
+      }
+    });
+  });
+  return ids;
+}
+
+async function loadDuplicates() {
+  const data = await fetchJson("/api/duplicates");
+  renderDuplicates(data);
+}
+
+async function handleRemoveDuplicates(ids) {
+  if (!ids.length) {
+    setError("No duplicate transactions selected for removal.");
+    return;
+  }
+
+  const txWord = ids.length === 1 ? "transaction" : "transactions";
+  if (!window.confirm(`Remove ${ids.length} ${txWord}? This cannot be undone.`)) {
+    return;
+  }
+
+  setError("");
+  try {
+    await fetchJson("/api/duplicates/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    await Promise.all([loadDuplicates(), loadSources()]);
+  } catch (err) {
+    setError(err.message);
+  }
 }
 
 async function loadSources() {
@@ -135,7 +269,7 @@ async function handleUpload(event) {
     });
     renderImportResult(result);
     fileInput.value = "";
-    await loadSources();
+    await Promise.all([loadSources(), loadDuplicates()]);
   } catch (err) {
     setError(err.message);
   } finally {
@@ -145,10 +279,11 @@ async function handleUpload(event) {
 
 async function init() {
   try {
-    await loadSources();
+    await Promise.all([loadSources(), loadDuplicates()]);
     hide("import-loading");
     show("import-upload");
     show("import-status");
+    show("import-duplicates");
   } catch (err) {
     hide("import-loading");
     setError(err.message);
@@ -156,4 +291,18 @@ async function init() {
 }
 
 document.getElementById("import-form").addEventListener("submit", handleUpload);
+document.getElementById("duplicates-remove-btn").addEventListener("click", () => {
+  handleRemoveDuplicates(getIdsToRemove());
+});
+document.getElementById("duplicates-remove-all-btn").addEventListener("click", () => {
+  handleRemoveDuplicates(getSuggestedRemoveIds());
+});
+document.getElementById("duplicates-rescan-btn").addEventListener("click", async () => {
+  setError("");
+  try {
+    await loadDuplicates();
+  } catch (err) {
+    setError(err.message);
+  }
+});
 init();

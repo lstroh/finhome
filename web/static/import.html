@@ -45,6 +45,18 @@
       <p class="muted">Latest transaction date and last upload time per account type.</p>
       <div id="sources-table" class="table-wrap"></div>
     </section>
+
+    <section id="import-duplicates" class="import-section hidden">
+      <h2>Duplicate transactions</h2>
+      <p class="muted">Same date, description, and amount imported from different files.</p>
+      <div id="duplicates-summary" class="muted"></div>
+      <div id="duplicates-actions" class="import-form-actions hidden">
+        <button type="button" id="duplicates-remove-btn" class="import-submit">Remove selected duplicates</button>
+        <button type="button" id="duplicates-remove-all-btn" class="btn-secondary" title="Uses suggested keep, not your radio changes">Remove all (keep suggested)</button>
+        <button type="button" id="duplicates-rescan-btn" class="btn-secondary">Rescan</button>
+      </div>
+      <div id="duplicates-table" class="table-wrap"></div>
+    </section>
   </main>
 
   <script src="/static/import.js"></script>

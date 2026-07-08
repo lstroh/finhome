@@ -11,6 +11,7 @@ from db_layer import make_hash, set_category_budget
 from report_data import (
     category_options,
     category_transactions,
+    find_duplicates,
     list_months,
     month_over_month,
     month_report,
@@ -20,6 +21,7 @@ from report_data import (
     subscriptions,
     summary,
     uncategorised,
+    validate_duplicate_removal,
     year_avg_baseline,
 )
 
@@ -482,6 +484,111 @@ class TestSummary(unittest.TestCase):
         self.assertEqual(data["uncategorised_count"], 1)
         self.assertIsNotNone(data["month"])
         self.assertIsNotNone(data["trends"])
+
+
+class TestFindDuplicates(unittest.TestCase):
+    def test_two_rows_different_source_account(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_a")
+        insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "account_b")
+        conn.commit()
+
+        data = find_duplicates(conn)
+        self.assertEqual(data["group_count"], 1)
+        self.assertEqual(data["extra_row_count"], 1)
+        self.assertEqual(len(data["groups"][0]["transactions"]), 2)
+
+    def test_three_rows_one_group(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_b")
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_c")
+        conn.commit()
+
+        data = find_duplicates(conn)
+        self.assertEqual(data["group_count"], 1)
+        self.assertEqual(data["extra_row_count"], 2)
+
+    def test_different_amount_not_duplicate(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        insert_row(conn, "2026-05-29", "TESCO", -51.0, "Groceries", "account_b")
+        conn.commit()
+
+        data = find_duplicates(conn)
+        self.assertEqual(data["group_count"], 0)
+        self.assertEqual(data["extra_row_count"], 0)
+
+    def test_suggested_keep_newer_export(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "old_export")
+        insert_row(conn, "2026-06-15", "OTHER", -10.0, "Shopping", "old_export")
+        insert_row(conn, "2026-05-29", "OCTOPUS ENERGY LTD", -135.0, "Utilities", "new_export")
+        insert_row(conn, "2026-07-03", "OTHER", -10.0, "Shopping", "new_export")
+        conn.commit()
+
+        data = find_duplicates(conn)
+        txs = {tx["source_account"]: tx for tx in data["groups"][0]["transactions"]}
+        self.assertFalse(txs["old_export"]["suggested_keep"])
+        self.assertTrue(txs["new_export"]["suggested_keep"])
+
+    def test_suggested_keep_tie_breaks_on_highest_id(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        insert_row(conn, "2026-05-30", "OTHER", -10.0, "Shopping", "account_a")
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_b")
+        insert_row(conn, "2026-05-30", "OTHER", -10.0, "Shopping", "account_b")
+        conn.commit()
+
+        data = find_duplicates(conn)
+        txs = data["groups"][0]["transactions"]
+        keep = [tx for tx in txs if tx["suggested_keep"]]
+        self.assertEqual(len(keep), 1)
+        self.assertEqual(keep[0]["id"], max(tx["id"] for tx in txs))
+
+    def test_case_only_description_difference(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "Tesco", -10.0, "Groceries", "test")
+        insert_row(conn, "2026-05-01", "TESCO", -10.0, "Groceries", "test")
+        conn.commit()
+
+        data = find_duplicates(conn)
+        self.assertEqual(data["group_count"], 1)
+
+    def test_validate_rejects_unknown_id(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_b")
+        conn.commit()
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_duplicate_removal(conn, [999])
+        self.assertIn("unknown transaction id", str(ctx.exception))
+
+    def test_validate_rejects_non_duplicate_id(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_b")
+        insert_row(conn, "2026-05-30", "UNIQUE", -5.0, "Shopping", "account_a")
+        conn.commit()
+        unique_id = conn.execute(
+            "SELECT id FROM transactions WHERE description = 'UNIQUE'"
+        ).fetchone()[0]
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_duplicate_removal(conn, [unique_id])
+        self.assertIn("is not a duplicate", str(ctx.exception))
+
+    def test_validate_rejects_removing_all_copies(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_a")
+        insert_row(conn, "2026-05-29", "TESCO", -50.0, "Groceries", "account_b")
+        conn.commit()
+        ids = [row[0] for row in conn.execute("SELECT id FROM transactions").fetchall()]
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_duplicate_removal(conn, ids)
+        self.assertIn("would remove all copies", str(ctx.exception))
 
 
 if __name__ == "__main__":

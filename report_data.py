@@ -540,6 +540,114 @@ def subscriptions(conn):
     }
 
 
+def _account_latest_dates(conn):
+    """Map each source_account to its latest transaction date."""
+    rows = conn.execute(
+        "SELECT source_account, MAX(date) FROM transactions GROUP BY source_account"
+    ).fetchall()
+    return {account: latest for account, latest in rows}
+
+
+def _duplicate_groups(conn):
+    """
+    Return duplicate groups as (date, norm_desc, rounded_amount, member_rows).
+    Each member_row is (id, date, description, amount, source_account, category, balance).
+    Cross-file duplicates share date + normalized description + rounded amount but differ
+    in source_account / raw_hash (see make_hash in db_layer).
+    """
+    keys = conn.execute(
+        """SELECT date, UPPER(TRIM(description)), ROUND(amount, 2), COUNT(*)
+           FROM transactions
+           GROUP BY 1, 2, 3
+           HAVING COUNT(*) >= 2"""
+    ).fetchall()
+
+    groups = []
+    for date, norm_desc, rounded_amount, _count in keys:
+        rows = conn.execute(
+            """SELECT id, date, description, amount, source_account, category, balance
+               FROM transactions
+               WHERE date = ? AND UPPER(TRIM(description)) = ? AND ROUND(amount, 2) = ?
+               ORDER BY id""",
+            (date, norm_desc, rounded_amount),
+        ).fetchall()
+        groups.append((date, norm_desc, rounded_amount, rows))
+    return groups
+
+
+def _suggested_keep_id(rows, account_latest_date):
+    """Pick the row to keep: newest export (latest account max date), then highest id."""
+    return max(
+        rows,
+        key=lambda row: (account_latest_date.get(row[4], ""), row[0]),
+    )[0]
+
+
+def find_duplicates(conn):
+    """Return duplicate groups with suggested_keep flags for the Import UI."""
+    account_latest_date = _account_latest_dates(conn)
+    raw_groups = _duplicate_groups(conn)
+
+    groups = []
+    extra_row_count = 0
+    for date, norm_desc, rounded_amount, rows in raw_groups:
+        keep_id = _suggested_keep_id(rows, account_latest_date)
+        transactions = []
+        for row_id, _date, _description, _amount, source_account, category, _balance in rows:
+            transactions.append({
+                "id": row_id,
+                "source_account": source_account,
+                "category": category,
+                "suggested_keep": row_id == keep_id,
+            })
+        extra_row_count += len(rows) - 1
+        groups.append({
+            "key": {
+                "date": date,
+                "description": norm_desc,
+                "amount": float(rounded_amount),
+            },
+            "transactions": transactions,
+        })
+
+    return {
+        "group_count": len(groups),
+        "extra_row_count": extra_row_count,
+        "groups": groups,
+    }
+
+
+def validate_duplicate_removal(conn, ids_to_remove):
+    """
+    Raise ValueError if ids are invalid or would delete all copies of any group.
+    Caller must ensure ids_to_remove is a non-empty list of positive ints.
+    """
+    unique_ids = list(dict.fromkeys(ids_to_remove))
+
+    existing = {
+        row[0]
+        for row in conn.execute(
+            f"SELECT id FROM transactions WHERE id IN ({','.join('?' * len(unique_ids))})",
+            unique_ids,
+        ).fetchall()
+    }
+    for tid in unique_ids:
+        if tid not in existing:
+            raise ValueError(f"unknown transaction id: {tid}")
+
+    duplicate_ids = set()
+    for _date, _norm_desc, _rounded_amount, rows in _duplicate_groups(conn):
+        group_ids = {row[0] for row in rows}
+        duplicate_ids |= group_ids
+        removing = group_ids.intersection(unique_ids)
+        if removing and len(removing) == len(group_ids):
+            raise ValueError("would remove all copies of a duplicate group")
+
+    for tid in unique_ids:
+        if tid not in duplicate_ids:
+            raise ValueError(f"id {tid} is not a duplicate")
+
+
 def source_status(conn):
     """Return aggregated status for bank and credit card sources."""
     tx_stats = {}

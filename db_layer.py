@@ -214,3 +214,16 @@ def set_category_budget(conn, category: str, monthly_amount: float):
 def clear_category_budget(conn, category: str):
     conn.execute("DELETE FROM category_budgets WHERE category = ?", (category,))
     conn.commit()
+
+
+def delete_transactions(conn, transaction_ids: list[int]) -> int:
+    """Delete transactions by id. Returns number of rows removed."""
+    if not transaction_ids:
+        return 0
+    placeholders = ",".join("?" * len(transaction_ids))
+    cur = conn.execute(
+        f"DELETE FROM transactions WHERE id IN ({placeholders})",
+        transaction_ids,
+    )
+    conn.commit()
+    return cur.rowcount

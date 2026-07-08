@@ -705,3 +705,33 @@ td.amount.negative {
   color: var(--danger);
   font-size: 0.875rem;
 }
+
+.import-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.btn-secondary {
+  font: inherit;
+  padding: 0.5rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: var(--accent-soft);
+}
+
+.duplicate-group-start td {
+  border-top: 2px solid var(--border);
+}
+
+.duplicate-group-start:first-child td {
+  border-top: none;
+}
