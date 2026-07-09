@@ -73,6 +73,33 @@ function fmtRemaining(remaining, overBudget) {
   return `${amount} left`;
 }
 
+function fmtPctOfIncome(pct) {
+  if (pct == null) return "—";
+  return pct.toFixed(1) + "% of avg income";
+}
+
+function summaryCardHtml(label, metric, spending) {
+  const highlight = vsAvgHighlight(metric.diff_pct, metric.diff);
+  return `
+    <div class="card">
+      <div class="card-label">${escapeHtml(label)}</div>
+      <div class="card-value ${spending ? "negative" : "positive"}">${fmtGbp(metric.selected)}</div>
+      <div class="card-sub muted">12-mo avg ${fmtGbp(metric.average)}</div>
+      <div class="card-sub ${highlight}">${fmtDiff(metric.diff)} (${fmtDiffPct(metric.diff_pct)})</div>
+    </div>
+  `;
+}
+
+function profitLossCardHtml(label, amount) {
+  const valueClass = amount < 0 ? "negative" : amount > 0 ? "positive" : "";
+  return `
+    <div class="card">
+      <div class="card-label">${escapeHtml(label)}</div>
+      <div class="card-value ${valueClass}">${fmtGbp(amount)}</div>
+    </div>
+  `;
+}
+
 function vsAvgHighlight(diffPct, diff) {
   if (diffPct == null) return "";
   if (Math.abs(diffPct) >= 30 && Math.abs(diff) > 20) {
@@ -1001,17 +1028,7 @@ function renderVsAverage(data) {
   }
 
   function summaryCard(label, metric, spending) {
-    const highlight = spending
-      ? vsAvgHighlight(metric.diff_pct, metric.diff)
-      : vsAvgHighlight(metric.diff_pct, metric.diff);
-    return `
-      <div class="card">
-        <div class="card-label">${escapeHtml(label)}</div>
-        <div class="card-value ${spending ? "negative" : "positive"}">${fmtGbp(metric.selected)}</div>
-        <div class="card-sub muted">12-mo avg ${fmtGbp(metric.average)}</div>
-        <div class="card-sub ${highlight}">${fmtDiff(metric.diff)} (${fmtDiffPct(metric.diff_pct)})</div>
-      </div>
-    `;
+    return summaryCardHtml(label, metric, spending);
   }
 
   const rows = data.categories.map((cat) => {
@@ -1077,6 +1094,7 @@ function renderVsAverage(data) {
     <div class="cards vs-average-cards">
       ${summaryCard("Income", data.income, false)}
       ${summaryCard("Total spend", data.total_spend, true)}
+      ${profitLossCardHtml("Profit / loss", data.profit_loss)}
     </div>
     <h2>Spending by category vs average</h2>
     <p class="muted category-hint">Enter an expected monthly amount per category — saved locally in your database.</p>
@@ -1245,13 +1263,25 @@ function renderCurrentMonth(data) {
     <h2>${escapeHtml(fmtMonthLabel(data.month))}</h2>
     <p class="muted">Expected amounts use your saved budgets where set; otherwise the 12-month average (${escapeHtml(windowLabel)}).</p>
     <div class="cards current-month-cards">
+      ${summaryCardHtml("Income", data.income, false)}
+      ${profitLossCardHtml("Profit / loss", data.profit_loss)}
+    </div>
+    <p class="muted">Average income is based on ${escapeHtml(windowLabel)}.</p>
+    <div class="cards current-month-cards">
       <div class="card">
         <div class="card-label">Total spend</div>
         <div class="card-value negative">${fmtGbp(data.total_spend)}</div>
+        <div class="card-sub muted">${fmtPctOfIncome(data.current_spend_pct_of_income_avg)}</div>
       </div>
       <div class="card">
         <div class="card-label">Total expected</div>
         <div class="card-value">${fmtGbp(data.total_expected)}</div>
+        <div class="card-sub muted">${fmtPctOfIncome(data.expected_spend_pct_of_income_avg)}</div>
+      </div>
+      <div class="card">
+        <div class="card-label">12-mo avg spend</div>
+        <div class="card-value negative">${fmtGbp(data.total_spend_avg)}</div>
+        <div class="card-sub muted">${fmtPctOfIncome(data.avg_spend_pct_of_income_avg)}</div>
       </div>
       <div class="card">
         <div class="card-label">${totalRemainingLabel}</div>

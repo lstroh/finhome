@@ -230,6 +230,10 @@ body {
   margin-top: 1rem;
 }
 
+.current-month-cards + .current-month-cards {
+  margin-top: 0.75rem;
+}
+
 .bar-fill.over {
   background: var(--danger);
 }

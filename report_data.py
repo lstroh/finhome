@@ -356,6 +356,7 @@ def month_vs_year_avg(conn, target_month: str):
         "total_spend": _compare_metric(
             selected_total_spend, baseline["total_spend_avg"], spending=True
         ),
+        "profit_loss": selected_income + selected_total_spend,
         "budget_total": budget_total,
         "categories": categories,
     }
@@ -390,6 +391,12 @@ def _progress_fields(spent, expected):
     }
 
 
+def _pct_of_income(spend_amount, income_avg):
+    if income_avg == 0:
+        return None
+    return abs(spend_amount) / income_avg * 100
+
+
 def month_spending_progress(conn, target_month: str):
     """
     Calendar-month spending vs resolved expected amounts per category.
@@ -409,9 +416,11 @@ def month_spending_progress(conn, target_month: str):
     if selected.get("empty"):
         spent_by_cat = {}
         total_spend = 0.0
+        selected_income = 0.0
     else:
         spent_by_cat = {c["name"]: c["amount"] for c in selected["categories"]}
         total_spend = selected["total_spend"]
+        selected_income = selected["income"]
 
     budgets = get_category_budgets(conn)
     avgs = baseline["category_avgs"]
@@ -437,6 +446,8 @@ def month_spending_progress(conn, target_month: str):
         })
 
     total_remaining = abs(total_expected) - abs(total_spend)
+    income_avg = baseline["income_avg"]
+    total_spend_avg = baseline["total_spend_avg"]
 
     return {
         "empty": False,
@@ -445,9 +456,15 @@ def month_spending_progress(conn, target_month: str):
         "window_start": baseline["window_start"],
         "window_end": baseline["window_end"],
         "month_count": baseline["month_count"],
+        "income": _compare_metric(selected_income, income_avg, spending=False),
         "total_spend": total_spend,
         "total_expected": total_expected,
         "total_remaining": total_remaining,
+        "total_spend_avg": total_spend_avg,
+        "current_spend_pct_of_income_avg": _pct_of_income(total_spend, income_avg),
+        "expected_spend_pct_of_income_avg": _pct_of_income(total_expected, income_avg),
+        "avg_spend_pct_of_income_avg": _pct_of_income(total_spend_avg, income_avg),
+        "profit_loss": selected_income + total_spend,
         "categories": categories,
     }
 

@@ -269,6 +269,14 @@ class TestMonthVsYearAvg(unittest.TestCase):
         self.assertAlmostEqual(data["budget_total"]["expected_diff"], -35)
         self.assertAlmostEqual(data["total_spend"]["selected"], -465)
 
+    def test_profit_loss(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "SALARY", 3000, "Income")
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        conn.commit()
+        data = month_vs_year_avg(conn, "2026-05")
+        self.assertAlmostEqual(data["profit_loss"], 2900)
+
 
 class TestMonthSpendingProgress(unittest.TestCase):
     def test_budget_takes_precedence_over_average(self):
@@ -334,6 +342,65 @@ class TestMonthSpendingProgress(unittest.TestCase):
         self.assertAlmostEqual(groceries["spent"], 0)
         self.assertAlmostEqual(groceries["expected"], -300)
         self.assertAlmostEqual(data["total_spend"], 0)
+
+    def test_income_comparison_fields(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-04-01", "SALARY", 4000, "Income")
+        insert_row(conn, "2026-05-01", "SALARY", 2000, "Income")
+        insert_row(conn, "2026-05-01", "TESCO", -1000, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        self.assertAlmostEqual(data["income"]["selected"], 2000)
+        self.assertAlmostEqual(data["income"]["average"], 3000)
+        self.assertAlmostEqual(data["income"]["diff"], -1000)
+        self.assertAlmostEqual(data["income"]["diff_pct"], -1000 / 3000 * 100)
+
+    def test_spend_pct_of_income_avg(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "SALARY", 4000, "Income")
+        insert_row(conn, "2026-05-01", "TESCO", -1000, "Groceries")
+        set_category_budget(conn, "Groceries", -800)
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        self.assertAlmostEqual(data["current_spend_pct_of_income_avg"], 25.0)
+        self.assertAlmostEqual(data["expected_spend_pct_of_income_avg"], 20.0)
+        self.assertAlmostEqual(data["avg_spend_pct_of_income_avg"], 25.0)
+        self.assertAlmostEqual(data["total_spend_avg"], -1000)
+
+    def test_spend_pct_none_when_no_income_avg(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        self.assertIsNone(data["current_spend_pct_of_income_avg"])
+        self.assertIsNone(data["expected_spend_pct_of_income_avg"])
+        self.assertIsNone(data["avg_spend_pct_of_income_avg"])
+
+    def test_empty_calendar_month_income_and_pct(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "SALARY", 4000, "Income")
+        insert_row(conn, "2026-05-01", "TESCO", -1000, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-01")
+        self.assertAlmostEqual(data["income"]["selected"], 0)
+        self.assertAlmostEqual(data["income"]["average"], 4000)
+        self.assertAlmostEqual(data["current_spend_pct_of_income_avg"], 0.0)
+
+    def test_profit_loss(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "SALARY", 3000, "Income")
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        self.assertAlmostEqual(data["profit_loss"], 2900)
+
+    def test_profit_loss_empty_calendar_month(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "SALARY", 3000, "Income")
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-01")
+        self.assertAlmostEqual(data["profit_loss"], 0.0)
 
 
 class TestUncategorised(unittest.TestCase):
