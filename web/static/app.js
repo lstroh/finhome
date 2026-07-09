@@ -23,6 +23,7 @@ const state = {
   transactions: { month: null, data: null, loading: false, selectedSource: null, sort: { key: "date", asc: true } },
   vsAverage: { month: null, data: null, loading: false },
   savingBudgetCategory: null,
+  currentMonthProgress: { data: null, loading: false },
 };
 
 function fmtGbp(amount) {
@@ -53,6 +54,23 @@ function fmtDiffPct(value) {
   if (value == null) return "—";
   const sign = value > 0 ? "+" : value < 0 ? "" : "";
   return sign + value.toFixed(1) + "%";
+}
+
+function fmtMonthLabel(monthKey) {
+  if (!monthKey) return "";
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString("en-GB", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function fmtRemaining(remaining, overBudget) {
+  if (remaining == null) return "—";
+  if (remaining === 0) return fmtGbp(0);
+  const amount = fmtGbp(Math.abs(remaining));
+  if (overBudget) return `<span class="over-budget-text">${amount} over</span>`;
+  return `${amount} left`;
 }
 
 function vsAvgHighlight(diffPct, diff) {
@@ -433,6 +451,16 @@ async function refreshAfterCategoryChange() {
       renderVsAverageView();
     } catch {
       /* keep previous vs-average data on refresh failure */
+    }
+  }
+
+  if (state.currentMonthProgress.data) {
+    try {
+      const progressData = await fetchJson("/api/current-month");
+      state.currentMonthProgress = { data: progressData, loading: false };
+      renderCurrentMonthView();
+    } catch {
+      /* keep previous current-month data on refresh failure */
     }
   }
 
@@ -1103,6 +1131,9 @@ async function saveCategoryBudget(category, rawValue, originalValue) {
     if (state.vsAverage.month) {
       await loadVsAverageMonth(state.vsAverage.month);
     }
+    if (state.currentMonthProgress.data) {
+      await loadCurrentMonth();
+    }
   } catch (err) {
     state.savingBudgetCategory = null;
     renderVsAverageView();
@@ -1158,6 +1189,119 @@ async function loadVsAverageMonth(month) {
   } catch (err) {
     state.vsAverage = { month, data: null, loading: false };
     renderVsAverageView();
+    setError(err.message);
+  }
+}
+
+function renderCurrentMonth(data) {
+  const el = document.getElementById("current-month-content");
+  if (data.insufficient_data) {
+    el.innerHTML = '<p class="muted">Not enough data yet for spending progress.</p>';
+    return;
+  }
+
+  const windowLabel = `${data.window_start} – ${data.window_end}`;
+  const totalOver = data.total_remaining < 0;
+  const totalRemainingLabel = totalOver ? "Over budget" : "Remaining";
+  const totalRemainingValue = totalOver
+    ? `<span class="over-budget-text">${fmtGbp(Math.abs(data.total_remaining))}</span>`
+    : fmtGbp(data.total_remaining);
+
+  const rows = data.categories.map((cat) => {
+    const expectedCell = cat.expected != null
+      ? `${fmtGbp(cat.expected)}<span class="expected-source">${cat.expected_source === "budget" ? "budget" : "avg"}</span>`
+      : "—";
+    const barWidth = cat.progress_pct != null ? cat.progress_pct : 0;
+    const barClass = cat.over_budget ? "bar-fill over" : "bar-fill";
+    const trackClass = cat.over_budget ? "bar-track over" : "bar-track";
+    return `
+      <tr>
+        <td>${escapeHtml(cat.name)}</td>
+        <td class="amount negative">${fmtGbp(cat.spent)}</td>
+        <td class="amount">${expectedCell}</td>
+        <td class="amount">${fmtRemaining(cat.remaining, cat.over_budget)}</td>
+        <td class="progress-cell">
+          ${cat.expected != null
+            ? `<div class="${trackClass}"><div class="${barClass}" style="width:${barWidth}%"></div></div>`
+            : '<span class="muted">—</span>'}
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  const footer = data.categories.length ? `
+    <tfoot>
+      <tr class="total-row">
+        <td><strong>TOTAL</strong></td>
+        <td class="amount negative"><strong>${fmtGbp(data.total_spend)}</strong></td>
+        <td class="amount"><strong>${fmtGbp(data.total_expected)}</strong></td>
+        <td class="amount"><strong>${fmtRemaining(data.total_remaining, totalOver)}</strong></td>
+        <td></td>
+      </tr>
+    </tfoot>
+  ` : "";
+
+  el.innerHTML = `
+    <h2>${escapeHtml(fmtMonthLabel(data.month))}</h2>
+    <p class="muted">Expected amounts use your saved budgets where set; otherwise the 12-month average (${escapeHtml(windowLabel)}).</p>
+    <div class="cards current-month-cards">
+      <div class="card">
+        <div class="card-label">Total spend</div>
+        <div class="card-value negative">${fmtGbp(data.total_spend)}</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Total expected</div>
+        <div class="card-value">${fmtGbp(data.total_expected)}</div>
+      </div>
+      <div class="card">
+        <div class="card-label">${totalRemainingLabel}</div>
+        <div class="card-value ${totalOver ? "over-budget-text" : ""}">${totalRemainingValue}</div>
+      </div>
+    </div>
+    <h2>Spending by category</h2>
+    <div class="table-wrap">
+      <table id="current-month-table">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th class="amount">Spent</th>
+            <th class="amount">Expected</th>
+            <th class="amount">Remaining</th>
+            <th>Progress</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="5" class="muted">No spending categories.</td></tr>'}</tbody>
+        ${footer}
+      </table>
+    </div>
+  `;
+}
+
+function renderCurrentMonthView() {
+  const container = document.getElementById("current-month-content");
+  if (state.currentMonthProgress.loading) {
+    container.innerHTML = '<p class="muted">Loading…</p>';
+    return;
+  }
+  if (!state.currentMonthProgress.data) {
+    container.innerHTML = '<p class="muted">Loading current month spending…</p>';
+    return;
+  }
+  renderCurrentMonth(state.currentMonthProgress.data);
+}
+
+async function loadCurrentMonth() {
+  clearError();
+  state.currentMonthProgress = { data: null, loading: true };
+  renderCurrentMonthView();
+
+  try {
+    const data = await fetchJson("/api/current-month");
+    state.currentMonthProgress = { data, loading: false };
+    renderCurrentMonthView();
+  } catch (err) {
+    state.currentMonthProgress = { data: null, loading: false };
+    renderCurrentMonthView();
     setError(err.message);
   }
 }
@@ -1406,6 +1550,9 @@ function switchView(view) {
     const month = state.vsAverage.month || state.selectedMonth;
     if (month) loadVsAverageMonth(month);
   }
+  if (view === "current-month" && !state.currentMonthProgress.data && !state.currentMonthProgress.loading) {
+    loadCurrentMonth();
+  }
 }
 
 async function loadMonth(month) {
@@ -1452,6 +1599,7 @@ async function init() {
     switchView("overview");
     document.querySelectorAll(".view").forEach((v) => v.classList.remove("hidden"));
     hide("view-trends");
+    hide("view-current-month");
     hide("view-vs-average");
     hide("view-subscriptions");
     hide("view-search");

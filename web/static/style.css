@@ -226,6 +226,33 @@ body {
   margin-top: 1rem;
 }
 
+.current-month-cards {
+  margin-top: 1rem;
+}
+
+.bar-fill.over {
+  background: var(--danger);
+}
+
+.bar-track.over {
+  background: var(--danger-soft);
+}
+
+.expected-source {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: normal;
+}
+
+.progress-cell {
+  min-width: 8rem;
+}
+
+.over-budget-text {
+  color: var(--danger);
+}
+
 .budget-cell {
   padding-top: 0.35rem;
   padding-bottom: 0.35rem;

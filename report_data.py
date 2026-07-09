@@ -361,6 +361,97 @@ def month_vs_year_avg(conn, target_month: str):
     }
 
 
+def _resolve_expected(category, budgets, avgs):
+    if category in budgets:
+        return budgets[category], "budget"
+    avg = avgs.get(category, 0.0)
+    if avg != 0:
+        return avg, "average"
+    return None, None
+
+
+def _progress_fields(spent, expected):
+    if expected is None:
+        return {
+            "progress_pct": None,
+            "over_budget": False,
+            "remaining": None,
+        }
+    over_budget = abs(spent) > abs(expected)
+    remaining = abs(expected) - abs(spent)
+    if expected == 0:
+        progress_pct = 100.0 if spent != 0 else 0.0
+    else:
+        progress_pct = min(100.0, abs(spent) / abs(expected) * 100)
+    return {
+        "progress_pct": progress_pct,
+        "over_budget": over_budget,
+        "remaining": remaining,
+    }
+
+
+def month_spending_progress(conn, target_month: str):
+    """
+    Calendar-month spending vs resolved expected amounts per category.
+    Expected = user budget when set, otherwise 12-month rolling average.
+    """
+    baseline = year_avg_baseline(conn)
+    if baseline.get("empty"):
+        return {"empty": True}
+    if baseline.get("insufficient_data"):
+        return {
+            "empty": False,
+            "insufficient_data": True,
+            "month": target_month,
+        }
+
+    selected = month_report(conn, target_month)
+    if selected.get("empty"):
+        spent_by_cat = {}
+        total_spend = 0.0
+    else:
+        spent_by_cat = {c["name"]: c["amount"] for c in selected["categories"]}
+        total_spend = selected["total_spend"]
+
+    budgets = get_category_budgets(conn)
+    avgs = baseline["category_avgs"]
+
+    all_categories = sorted(
+        set(avgs.keys()) | set(spent_by_cat.keys()) | set(budgets.keys()),
+        key=lambda cat: spent_by_cat.get(cat, 0),
+    )
+
+    categories = []
+    total_expected = 0.0
+    for cat in all_categories:
+        spent = spent_by_cat.get(cat, 0.0)
+        expected, source = _resolve_expected(cat, budgets, avgs)
+        if expected is not None:
+            total_expected += expected
+        categories.append({
+            "name": cat,
+            "spent": spent,
+            "expected": expected,
+            "expected_source": source,
+            **_progress_fields(spent, expected),
+        })
+
+    total_remaining = abs(total_expected) - abs(total_spend)
+
+    return {
+        "empty": False,
+        "insufficient_data": False,
+        "month": target_month,
+        "window_start": baseline["window_start"],
+        "window_end": baseline["window_end"],
+        "month_count": baseline["month_count"],
+        "total_spend": total_spend,
+        "total_expected": total_expected,
+        "total_remaining": total_remaining,
+        "categories": categories,
+    }
+
+
 def category_options(conn):
     """Categories for UI dropdowns: rules, DB values, and Uncategorised."""
     cur = conn.execute("SELECT DISTINCT category FROM transactions ORDER BY category")

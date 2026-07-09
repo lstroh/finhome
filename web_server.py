@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +35,7 @@ from report_data import (
     month_over_month,
     month_report,
     month_transactions,
+    month_spending_progress,
     month_vs_year_avg,
     search_transactions,
     source_status,
@@ -108,6 +110,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_error(400, "month must be YYYY-MM")
                 return
             self._api(lambda conn: self._json_ok(month_vs_year_avg(conn, month)))
+        elif path == "/api/current-month":
+            month = query.get("month", [None])[0] or date.today().strftime("%Y-%m")
+            if not MONTH_RE.match(month):
+                self._json_error(400, "month must be YYYY-MM")
+                return
+            self._api(lambda conn: self._json_ok(month_spending_progress(conn, month)))
         elif path == "/api/subscriptions":
             self._api(lambda conn: self._json_ok(subscriptions(conn)))
         elif path == "/api/uncategorised":

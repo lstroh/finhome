@@ -15,6 +15,7 @@ from report_data import (
     list_months,
     month_over_month,
     month_report,
+    month_spending_progress,
     month_transactions,
     month_vs_year_avg,
     search_transactions,
@@ -267,6 +268,72 @@ class TestMonthVsYearAvg(unittest.TestCase):
         self.assertAlmostEqual(data["budget_total"]["expected"], -430)
         self.assertAlmostEqual(data["budget_total"]["expected_diff"], -35)
         self.assertAlmostEqual(data["total_spend"]["selected"], -465)
+
+
+class TestMonthSpendingProgress(unittest.TestCase):
+    def test_budget_takes_precedence_over_average(self):
+        conn = make_test_conn()
+        for m, amt in [("2026-04", -300), ("2026-05", -300), ("2026-06", -450)]:
+            insert_row(conn, f"{m}-01", "TESCO", amt, "Groceries")
+        set_category_budget(conn, "Groceries", -400)
+        conn.commit()
+        data = month_spending_progress(conn, "2026-06")
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["expected"], -400)
+        self.assertEqual(groceries["expected_source"], "budget")
+
+    def test_average_when_no_budget(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -300, "Groceries")
+        insert_row(conn, "2026-06-01", "TESCO", -450, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-06")
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertEqual(groceries["expected_source"], "average")
+        self.assertAlmostEqual(groceries["expected"], -375)
+
+    def test_over_budget_progress_capped(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -500, "Groceries")
+        set_category_budget(conn, "Groceries", -400)
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertTrue(groceries["over_budget"])
+        self.assertAlmostEqual(groceries["progress_pct"], 100.0)
+        self.assertAlmostEqual(groceries["remaining"], -100)
+
+    def test_budget_only_category_zero_spent(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -100, "Groceries")
+        set_category_budget(conn, "Subscriptions", -30)
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        subs = next(c for c in data["categories"] if c["name"] == "Subscriptions")
+        self.assertAlmostEqual(subs["spent"], 0)
+        self.assertAlmostEqual(subs["expected"], -30)
+        self.assertEqual(subs["expected_source"], "budget")
+        self.assertAlmostEqual(subs["progress_pct"], 0)
+
+    def test_total_expected_hybrid_sum(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -450, "Groceries")
+        insert_row(conn, "2026-05-02", "NETFLIX", -15, "Subscriptions")
+        set_category_budget(conn, "Groceries", -400)
+        conn.commit()
+        data = month_spending_progress(conn, "2026-05")
+        self.assertAlmostEqual(data["total_expected"], -415)
+
+    def test_empty_calendar_month(self):
+        conn = make_test_conn()
+        insert_row(conn, "2026-05-01", "TESCO", -300, "Groceries")
+        conn.commit()
+        data = month_spending_progress(conn, "2026-01")
+        self.assertEqual(data["month"], "2026-01")
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["spent"], 0)
+        self.assertAlmostEqual(groceries["expected"], -300)
+        self.assertAlmostEqual(data["total_spend"], 0)
 
 
 class TestUncategorised(unittest.TestCase):

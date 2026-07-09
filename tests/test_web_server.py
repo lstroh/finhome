@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db_layer
 import web_server
-from db_layer import make_hash
+from db_layer import make_hash, set_category_budget
 
 
 def _start_server():
@@ -184,6 +184,41 @@ class TestWebServerApi(unittest.TestCase):
             status, _, data = _get_json(self.host, self.port, "/api/month?month=bad")
         self.assertEqual(status, 400)
         self.assertEqual(data, {"error": "month must be YYYY-MM"})
+
+    def test_current_month_invalid_month_returns_400(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(self.host, self.port, "/api/current-month?month=bad")
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "month must be YYYY-MM"})
+
+    def test_current_month_returns_progress(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "test.db"
+        _create_db(db_path)
+        conn = sqlite3.connect(db_path)
+        _insert_row(conn, "2026-05-01", "TESCO", -450, "Groceries")
+        set_category_budget(conn, "Groceries", -400)
+        conn.commit()
+        conn.close()
+
+        with patch.object(web_server, "DB_PATH", db_path), patch.object(db_layer, "DB_PATH", db_path):
+            status, _, data = _get_json(
+                self.host, self.port, "/api/current-month?month=2026-05"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["month"], "2026-05")
+        self.assertAlmostEqual(data["total_spend"], -450)
+        groceries = next(c for c in data["categories"] if c["name"] == "Groceries")
+        self.assertAlmostEqual(groceries["expected"], -400)
+        self.assertEqual(groceries["expected_source"], "budget")
+        self.assertTrue(groceries["over_budget"])
 
     def test_empty_db_summary(self):
         tmp = TemporaryDirectory()

@@ -18,6 +18,7 @@
 
   <nav class="tabs" role="tablist">
     <button class="tab active" data-view="overview" role="tab" aria-selected="true">Overview</button>
+    <button class="tab" data-view="current-month" role="tab" aria-selected="false">Current month</button>
     <button class="tab" data-view="trends" role="tab" aria-selected="false">Trends</button>
     <button class="tab" data-view="vs-average" role="tab" aria-selected="false">vs Average</button>
     <button class="tab" data-view="subscriptions" role="tab" aria-selected="false">Subscriptions</button>
@@ -46,6 +47,10 @@
       <div id="benchmark" class="benchmark"></div>
       <h2>Top merchants</h2>
       <div id="merchants" class="table-wrap"></div>
+    </section>
+
+    <section id="view-current-month" class="view hidden">
+      <div id="current-month-content"></div>
     </section>
 
     <section id="view-trends" class="view hidden">
